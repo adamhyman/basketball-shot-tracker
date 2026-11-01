@@ -1,0 +1,16 @@
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native builds
+ios/
+android/
+
+# Debug and local files
+npm-debug.*
+*.log
+.DS_Store
+.env*.local
+*.tsbuildinfo
