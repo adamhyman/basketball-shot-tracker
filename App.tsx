@@ -16,14 +16,13 @@ import { StatusBar } from 'expo-status-bar';
 
 // ---------- Types ----------
 
-type ShotResult = 'madeFoul' | 'made' | 'missedFoul' | 'missedRebound' | 'missedNoRebound';
+type ShotResult = 'made' | 'madeFoul' | 'missed' | 'missedFoul';
 
 const RESULTS: { key: ShotResult; label: string }[] = [
+  { key: 'made', label: 'Made' },
   { key: 'madeFoul', label: 'Made with foul' },
-  { key: 'made', label: 'Made, no foul' },
+  { key: 'missed', label: 'Missed' },
   { key: 'missedFoul', label: 'Missed with foul' },
-  { key: 'missedRebound', label: 'Missed, teammate got rebound' },
-  { key: 'missedNoRebound', label: 'Missed, no team rebound' },
 ];
 
 const isMade = (r: ShotResult) => r === 'made' || r === 'madeFoul';
@@ -35,15 +34,31 @@ type Player = { id: string; name: string };
 // x: 0..50 ft (left to right), y: 0..47 ft (baseline up)
 type Shot = { id: string; playerId: string; x: number; y: number; result: ShotResult; date: number };
 type FreeThrow = { id: string; playerId: string; made: boolean; date: number };
+type Rebound = { id: string; playerId: string; date: number };
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STORAGE_KEY = 'shot-tracker-v1';
 const CORRUPT_BACKUP_KEY = 'shot-tracker-v1-corrupt-backup';
 
+// Older saves split misses by who got the rebound.
+const migrateShot = (s: Omit<Shot, 'result'> & { result: string }): Shot => ({
+  ...s,
+  result: s.result === 'missedRebound' || s.result === 'missedNoRebound' ? 'missed' : (s.result as ShotResult),
+});
+
 // ---------- Court ----------
 
 const COURT_W = 50;
 const COURT_H = 47;
+const RIM_X = 25;
+const RIM_Y = 5.25;
+const THREE_ARC_RADIUS = 23.75;
+const THREE_CORNER_X = 3; // distance of the corner three lines from each sideline
+
+const isThree = (s: Shot) =>
+  s.x < THREE_CORNER_X ||
+  s.x > COURT_W - THREE_CORNER_X ||
+  Math.hypot(s.x - RIM_X, s.y - RIM_Y) >= THREE_ARC_RADIUS;
 
 function Court({
   shots,
@@ -122,13 +137,11 @@ function PlayerPicker({
   selected,
   onSelect,
   onAdd,
-  allowAll,
 }: {
   players: Player[];
   selected: string | null;
   onSelect: (id: string | null) => void;
   onAdd: (name: string) => void;
-  allowAll: boolean;
 }) {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState('');
@@ -143,11 +156,9 @@ function PlayerPicker({
   return (
     <View style={{ paddingVertical: 8 }}>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 12, gap: 8 }}>
-        {allowAll && (
-          <Pressable onPress={() => onSelect(null)} style={[styles.chip, selected === null && styles.chipOn]}>
-            <Text style={[styles.chipText, selected === null && styles.chipTextOn]}>All</Text>
-          </Pressable>
-        )}
+        <Pressable onPress={() => onSelect(null)} style={[styles.chip, selected === null && styles.chipOn]}>
+          <Text style={[styles.chipText, selected === null && styles.chipTextOn]}>All</Text>
+        </Pressable>
         {players.map((p) => (
           <Pressable key={p.id} onPress={() => onSelect(p.id)} style={[styles.chip, selected === p.id && styles.chipOn]}>
             <Text style={[styles.chipText, selected === p.id && styles.chipTextOn]}>{p.name}</Text>
@@ -172,10 +183,10 @@ function PlayerPicker({
               returnKeyType="done"
             />
             <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
-              <Pressable style={[styles.btn, styles.btnGray]} onPress={() => { setName(''); setAdding(false); }}>
+              <Pressable style={[styles.btn, styles.btnGray, { flex: 1 }]} onPress={() => { setName(''); setAdding(false); }}>
                 <Text style={styles.btnText}>Cancel</Text>
               </Pressable>
-              <Pressable style={[styles.btn, styles.btnBlue]} onPress={submit}>
+              <Pressable style={[styles.btn, styles.btnBlue, { flex: 1 }]} onPress={submit}>
                 <Text style={[styles.btnText, { color: '#fff' }]}>Add</Text>
               </Pressable>
             </View>
@@ -186,38 +197,131 @@ function PlayerPicker({
   );
 }
 
+// ---------- Free throws ----------
+
+function FreeThrowPanel({
+  playerId,
+  freeThrows,
+  addFT,
+  undoFT,
+}: {
+  playerId: string;
+  freeThrows: FreeThrow[];
+  addFT: (playerId: string, made: boolean) => void;
+  undoFT: (playerId: string) => void;
+}) {
+  const mine = freeThrows.filter((f) => f.playerId === playerId);
+
+  return (
+    <View style={styles.panel}>
+      <View style={styles.panelHeader}>
+        <Text style={styles.panelTitle}>Free throws</Text>
+        <Text style={styles.panelScore}>
+          {mine.filter((f) => f.made).length} / {mine.length}
+        </Text>
+      </View>
+      <View style={{ flexDirection: 'row', gap: 12, marginTop: 10 }}>
+        <Pressable style={[styles.panelBtn, styles.btnGreen]} onPress={() => addFT(playerId, true)}>
+          <Text style={styles.panelBtnText}>Made</Text>
+        </Pressable>
+        <Pressable style={[styles.panelBtn, styles.btnRed]} onPress={() => addFT(playerId, false)}>
+          <Text style={styles.panelBtnText}>Missed</Text>
+        </Pressable>
+      </View>
+      <Pressable
+        onPress={() => undoFT(playerId)}
+        disabled={mine.length === 0}
+        style={[styles.undo, { marginTop: 10, alignSelf: 'flex-end' }, mine.length === 0 && { opacity: 0.4 }]}
+      >
+        <Text style={styles.btnText}>Undo last free throw</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+// ---------- Rebounds ----------
+
+function ReboundPanel({
+  playerId,
+  rebounds,
+  addRebound,
+  undoRebound,
+}: {
+  playerId: string;
+  rebounds: Rebound[];
+  addRebound: (playerId: string) => void;
+  undoRebound: (playerId: string) => void;
+}) {
+  const count = rebounds.filter((r) => r.playerId === playerId).length;
+
+  return (
+    <View style={styles.panel}>
+      <View style={styles.panelHeader}>
+        <Text style={styles.panelTitle}>Rebounds</Text>
+        <Text style={styles.panelScore}>{count}</Text>
+      </View>
+      <View style={{ flexDirection: 'row', marginTop: 10 }}>
+        <Pressable style={[styles.panelBtn, styles.btnBlue]} onPress={() => addRebound(playerId)}>
+          <Text style={styles.panelBtnText}>+ Rebound</Text>
+        </Pressable>
+      </View>
+      <Pressable
+        onPress={() => undoRebound(playerId)}
+        disabled={count === 0}
+        style={[styles.undo, { marginTop: 10, alignSelf: 'flex-end' }, count === 0 && { opacity: 0.4 }]}
+      >
+        <Text style={styles.btnText}>Undo last rebound</Text>
+      </Pressable>
+    </View>
+  );
+}
+
 // ---------- Screens ----------
 
 function ShotsScreen(props: {
   players: Player[];
   shots: Shot[];
+  freeThrows: FreeThrow[];
+  rebounds: Rebound[];
   selected: string | null;
   setSelected: (id: string | null) => void;
   addPlayer: (name: string) => void;
   addShot: (s: Omit<Shot, 'id' | 'date'>) => void;
   undo: (playerId: string | null) => void;
+  addFT: (playerId: string, made: boolean) => void;
+  undoFT: (playerId: string) => void;
+  addRebound: (playerId: string) => void;
+  undoRebound: (playerId: string) => void;
 }) {
-  const { players, shots, selected, setSelected, addPlayer, addShot, undo } = props;
+  const { players, shots, freeThrows, rebounds, selected, setSelected, addPlayer, addShot, undo, addFT, undoFT, addRebound, undoRebound } = props;
   const [pending, setPending] = useState<{ x: number; y: number } | null>(null);
   const visible = useMemo(() => shots.filter((s) => selected === null || s.playerId === selected), [shots, selected]);
 
   return (
     <View style={{ flex: 1 }}>
-      <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} allowAll />
-      <Court shots={visible} onTapCourt={(x, y) => selected && setPending({ x, y })} />
-      <Text style={styles.hint}>
-        {selected
-          ? 'Tap the court where the shot was taken.'
-          : players.length === 0
-          ? 'Add a player to get started.'
-          : 'Select a player, then tap the court.'}
-      </Text>
-      <View style={styles.legend}>
-        <Text style={styles.legendText}>● made   ✕ missed   ○ foul</Text>
-        <Pressable onPress={() => undo(selected)} disabled={visible.length === 0} style={[styles.undo, visible.length === 0 && { opacity: 0.4 }]}>
-          <Text style={styles.btnText}>Undo last shot</Text>
-        </Pressable>
-      </View>
+      <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} />
+      <ScrollView contentContainerStyle={{ paddingBottom: 16 }}>
+        <Court shots={visible} onTapCourt={(x, y) => selected && setPending({ x, y })} />
+        <Text style={styles.hint}>
+          {selected
+            ? 'Tap the court where the shot was taken.'
+            : players.length === 0
+            ? 'Add a player to get started.'
+            : 'Select a player to record shots and free throws.'}
+        </Text>
+        <View style={styles.legend}>
+          <Text style={styles.legendText}>● made   ✕ missed   ○ foul</Text>
+          <Pressable onPress={() => undo(selected)} disabled={visible.length === 0} style={[styles.undo, visible.length === 0 && { opacity: 0.4 }]}>
+            <Text style={styles.btnText}>Undo last shot</Text>
+          </Pressable>
+        </View>
+        {selected && (
+          <>
+            <FreeThrowPanel playerId={selected} freeThrows={freeThrows} addFT={addFT} undoFT={undoFT} />
+            <ReboundPanel playerId={selected} rebounds={rebounds} addRebound={addRebound} undoRebound={undoRebound} />
+          </>
+        )}
+      </ScrollView>
 
       <Modal transparent animationType="fade" visible={pending !== null} onRequestClose={() => setPending(null)}>
         <View style={styles.backdrop}>
@@ -245,68 +349,38 @@ function ShotsScreen(props: {
   );
 }
 
-function FreeThrowScreen(props: {
+const shootingLine = (shots: Shot[]) => {
+  const made = shots.filter((x) => isMade(x.result)).length;
+  const attempts = shots.filter((x) => isFieldGoalAttempt(x.result)).length;
+  const pct = attempts ? ` (${Math.round((100 * made) / attempts)}%)` : '';
+  return `${made}/${attempts}${pct}`;
+};
+
+function StatsScreen({
+  players,
+  shots,
+  freeThrows,
+  rebounds,
+}: {
   players: Player[];
+  shots: Shot[];
   freeThrows: FreeThrow[];
-  selected: string | null;
-  setSelected: (id: string | null) => void;
-  addPlayer: (name: string) => void;
-  addFT: (playerId: string, made: boolean) => void;
-  undoFT: (playerId: string) => void;
+  rebounds: Rebound[];
 }) {
-  const { players, freeThrows, selected, setSelected, addPlayer, addFT, undoFT } = props;
-  const mine = freeThrows.filter((f) => f.playerId === selected);
-
-  return (
-    <View style={{ flex: 1 }}>
-      <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} allowAll={false} />
-      {selected ? (
-        <View style={{ padding: 16, alignItems: 'center' }}>
-          <Text style={styles.bigNumber}>
-            {mine.filter((f) => f.made).length} / {mine.length}
-          </Text>
-          <View style={{ flexDirection: 'row', gap: 12, marginTop: 24, width: '100%' }}>
-            <Pressable style={[styles.ftBtn, styles.btnGreen]} onPress={() => addFT(selected, true)}>
-              <Text style={styles.ftBtnText}>Made</Text>
-            </Pressable>
-            <Pressable style={[styles.ftBtn, styles.btnRed]} onPress={() => addFT(selected, false)}>
-              <Text style={styles.ftBtnText}>Missed</Text>
-            </Pressable>
-          </View>
-          <Pressable
-            onPress={() => undoFT(selected)}
-            disabled={mine.length === 0}
-            style={[styles.undo, { marginTop: 20 }, mine.length === 0 && { opacity: 0.4 }]}
-          >
-            <Text style={styles.btnText}>Undo last free throw</Text>
-          </Pressable>
-        </View>
-      ) : (
-        <Text style={styles.hint}>Select a player to record free throws.</Text>
-      )}
-    </View>
-  );
-}
-
-function StatsScreen({ players, shots, freeThrows }: { players: Player[]; shots: Shot[]; freeThrows: FreeThrow[] }) {
   if (players.length === 0) return <Text style={styles.hint}>No players yet.</Text>;
   return (
     <ScrollView contentContainerStyle={{ padding: 12, gap: 10 }}>
       {players.map((p) => {
         const s = shots.filter((x) => x.playerId === p.id);
         const ft = freeThrows.filter((x) => x.playerId === p.id);
-        const made = s.filter((x) => isMade(x.result)).length;
-        const attempts = s.filter((x) => isFieldGoalAttempt(x.result)).length;
-        const pct = attempts ? ` (${Math.round((100 * made) / attempts)}%)` : '';
         return (
           <View key={p.id} style={styles.statCard}>
             <Text style={styles.statName}>{p.name}</Text>
-            <Text style={styles.statLine}>FG {made}/{attempts}{pct}</Text>
+            <Text style={styles.statLine}>FG {shootingLine(s)}</Text>
+            <Text style={styles.statLine}>3PT {shootingLine(s.filter(isThree))}</Text>
             <Text style={styles.statLine}>FT {ft.filter((x) => x.made).length}/{ft.length}</Text>
-            <Text style={styles.statSmall}>
-              Fouled on {s.filter((x) => hasFoul(x.result)).length} shots · Team rebounds{' '}
-              {s.filter((x) => x.result === 'missedRebound').length}
-            </Text>
+            <Text style={styles.statLine}>Rebounds {rebounds.filter((x) => x.playerId === p.id).length}</Text>
+            <Text style={styles.statSmall}>Fouled on {s.filter((x) => hasFoul(x.result)).length} shots</Text>
           </View>
         );
       })}
@@ -316,12 +390,13 @@ function StatsScreen({ players, shots, freeThrows }: { players: Player[]; shots:
 
 // ---------- App ----------
 
-type Tab = 'shots' | 'ft' | 'stats';
+type Tab = 'shots' | 'stats';
 
 export default function App() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [shots, setShots] = useState<Shot[]>([]);
   const [freeThrows, setFreeThrows] = useState<FreeThrow[]>([]);
+  const [rebounds, setRebounds] = useState<Rebound[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('shots');
   const [loaded, setLoaded] = useState(false);
@@ -342,8 +417,9 @@ export default function App() {
         try {
           const d = JSON.parse(raw);
           setPlayers(d.players ?? []);
-          setShots(d.shots ?? []);
+          setShots((d.shots ?? []).map(migrateShot));
           setFreeThrows(d.freeThrows ?? []);
+          setRebounds(d.rebounds ?? []);
         } catch {
           // Unreadable data: keep a copy before normal saves replace it.
           await AsyncStorage.setItem(CORRUPT_BACKUP_KEY, raw).catch(() => setSavingBlocked(true));
@@ -355,8 +431,8 @@ export default function App() {
 
   useEffect(() => {
     if (!loaded || savingBlocked) return;
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ players, shots, freeThrows })).catch(() => {});
-  }, [players, shots, freeThrows, loaded, savingBlocked]);
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ players, shots, freeThrows, rebounds })).catch(() => {});
+  }, [players, shots, freeThrows, rebounds, loaded, savingBlocked]);
 
   const addPlayer = (name: string) => {
     const p = { id: uid(), name };
@@ -376,6 +452,12 @@ export default function App() {
       const i = prev.map((f) => f.playerId).lastIndexOf(playerId);
       return i < 0 ? prev : prev.filter((_, idx) => idx !== i);
     });
+  const addRebound = (playerId: string) => setRebounds((prev) => [...prev, { id: uid(), playerId, date: Date.now() }]);
+  const undoRebound = (playerId: string) =>
+    setRebounds((prev) => {
+      const i = prev.map((r) => r.playerId).lastIndexOf(playerId);
+      return i < 0 ? prev : prev.filter((_, idx) => idx !== i);
+    });
 
   if (!loaded) return null;
 
@@ -383,7 +465,7 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView style={styles.root}>
         <StatusBar style="dark" />
-        <Text style={styles.title}>{tab === 'shots' ? 'Shots' : tab === 'ft' ? 'Free Throws' : 'Stats'}</Text>
+        <Text style={styles.title}>{tab === 'shots' ? 'Shots' : 'Stats'}</Text>
         {savingBlocked && (
           <Text style={styles.warning}>Couldn't access saved data. Changes won't be saved. Restart the app to try again.</Text>
         )}
@@ -392,31 +474,25 @@ export default function App() {
             <ShotsScreen
               players={players}
               shots={shots}
+              freeThrows={freeThrows}
+              rebounds={rebounds}
               selected={selected}
               setSelected={setSelected}
               addPlayer={addPlayer}
               addShot={addShot}
               undo={undoShot}
-            />
-          )}
-          {tab === 'ft' && (
-            <FreeThrowScreen
-              players={players}
-              freeThrows={freeThrows}
-              selected={selected}
-              setSelected={setSelected}
-              addPlayer={addPlayer}
               addFT={addFT}
               undoFT={undoFT}
+              addRebound={addRebound}
+              undoRebound={undoRebound}
             />
           )}
-          {tab === 'stats' && <StatsScreen players={players} shots={shots} freeThrows={freeThrows} />}
+          {tab === 'stats' && <StatsScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
         </View>
         <View style={styles.tabBar}>
           {(
             [
               ['shots', 'Shots'],
-              ['ft', 'Free Throws'],
               ['stats', 'Stats'],
             ] as [Tab, string][]
           ).map(([key, label]) => (
@@ -449,15 +525,18 @@ const styles = StyleSheet.create({
   card: { backgroundColor: '#fff', borderRadius: 14, padding: 16 },
   cardTitle: { fontSize: 18, fontWeight: '700', textAlign: 'center' },
   input: { borderWidth: 1, borderColor: '#ced4da', borderRadius: 8, padding: 10, fontSize: 16, marginTop: 12 },
-  btn: { flex: 1, paddingVertical: 14, borderRadius: 10, alignItems: 'center' },
+  btn: { paddingVertical: 14, borderRadius: 10, alignItems: 'center' },
   btnText: { fontSize: 16, fontWeight: '600', color: '#212529' },
   btnGray: { backgroundColor: '#e9ecef' },
   btnBlue: { backgroundColor: '#1971c2' },
   btnGreen: { backgroundColor: '#2f9e44' },
   btnRed: { backgroundColor: '#e03131' },
-  bigNumber: { fontSize: 64, fontWeight: '800', marginTop: 16 },
-  ftBtn: { flex: 1, height: 90, borderRadius: 14, alignItems: 'center', justifyContent: 'center' },
-  ftBtnText: { fontSize: 24, fontWeight: '700', color: '#fff' },
+  panel: { marginTop: 16, marginHorizontal: 12, padding: 14, backgroundColor: '#fff', borderRadius: 12 },
+  panelHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  panelTitle: { fontSize: 18, fontWeight: '700' },
+  panelScore: { fontSize: 24, fontWeight: '800' },
+  panelBtn: { flex: 1, height: 64, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  panelBtnText: { fontSize: 20, fontWeight: '700', color: '#fff' },
   statCard: { backgroundColor: '#fff', borderRadius: 12, padding: 14 },
   statName: { fontSize: 18, fontWeight: '700', marginBottom: 4 },
   statLine: { fontSize: 16, marginTop: 2 },
