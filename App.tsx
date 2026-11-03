@@ -7,9 +7,11 @@ import {
   Modal,
   TextInput,
   StyleSheet,
+  Share,
+  Alert,
   useWindowDimensions,
 } from 'react-native';
-import Svg, { Rect, Circle, Line, Path } from 'react-native-svg';
+import Svg, { G, Rect, Circle, Line, Path } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -60,16 +62,45 @@ const isThree = (s: Shot) =>
   s.x > COURT_W - THREE_CORNER_X ||
   Math.hypot(s.x - RIM_X, s.y - RIM_Y) >= THREE_ARC_RADIUS;
 
+// Clockwise rotation of the drawn court. Shots are always stored in unrotated court coordinates.
+type Rotation = 0 | 90 | 180 | 270;
+
+const ROTATION_TRANSFORMS: Record<Rotation, string> = {
+  0: 'translate(0,0) rotate(0)',
+  90: `translate(${COURT_H},0) rotate(90)`,
+  180: `translate(${COURT_W},${COURT_H}) rotate(180)`,
+  270: `translate(0,${COURT_W}) rotate(270)`,
+};
+
+// Undoes ROTATION_TRANSFORMS: maps a point on the rotated drawing back to the unrotated drawing.
+const unrotate = (vx: number, vy: number, rotation: Rotation): [number, number] => {
+  switch (rotation) {
+    case 90:
+      return [vy, COURT_H - vx];
+    case 180:
+      return [COURT_W - vx, COURT_H - vy];
+    case 270:
+      return [COURT_W - vy, vx];
+    default:
+      return [vx, vy];
+  }
+};
+
 function Court({
   shots,
+  rotation,
   onTapCourt,
 }: {
   shots: Shot[];
+  rotation: Rotation;
   onTapCourt: (x: number, y: number) => void;
 }) {
   const { width } = useWindowDimensions();
+  const sideways = rotation % 180 !== 0;
+  const viewW = sideways ? COURT_H : COURT_W;
+  const viewH = sideways ? COURT_W : COURT_H;
   const w = Math.min(width - 24, 600);
-  const h = (w * COURT_H) / COURT_W;
+  const h = (w * viewH) / viewW;
   const line = '#ffffff';
   const sw = 0.3;
   const fy = (y: number) => COURT_H - y; // flip so baseline is at the bottom
@@ -79,51 +110,54 @@ function Court({
       style={{ width: w, height: h, alignSelf: 'center', borderRadius: 8, overflow: 'hidden' }}
       onPress={(e) => {
         const { locationX, locationY } = e.nativeEvent;
-        const x = Math.min(Math.max((locationX / w) * COURT_W, 0), COURT_W);
-        const y = Math.min(Math.max(COURT_H - (locationY / h) * COURT_H, 0), COURT_H);
+        const [cx, cy] = unrotate((locationX / w) * viewW, (locationY / h) * viewH, rotation);
+        const x = Math.min(Math.max(cx, 0), COURT_W);
+        const y = Math.min(Math.max(COURT_H - cy, 0), COURT_H);
         onTapCourt(x, y);
       }}
     >
       <View pointerEvents="none">
-        <Svg width={w} height={h} viewBox={`0 0 ${COURT_W} ${COURT_H}`}>
-          <Rect x={0} y={0} width={COURT_W} height={COURT_H} fill="#ecc99e" />
-          <Rect x={0.15} y={0.15} width={COURT_W - 0.3} height={COURT_H - 0.3} fill="none" stroke={line} strokeWidth={sw} />
-          {/* paint */}
-          <Rect x={17} y={fy(19)} width={16} height={19} fill="none" stroke={line} strokeWidth={sw} />
-          {/* free throw circle */}
-          <Circle cx={25} cy={fy(19)} r={6} fill="none" stroke={line} strokeWidth={sw} />
-          {/* backboard + rim */}
-          <Line x1={22} y1={fy(4)} x2={28} y2={fy(4)} stroke={line} strokeWidth={sw * 1.5} />
-          <Circle cx={25} cy={fy(5.25)} r={0.75} fill="none" stroke="#e8590c" strokeWidth={sw} />
-          {/* restricted area */}
-          <Path d={`M 29 ${fy(5.25)} A 4 4 0 0 0 21 ${fy(5.25)}`} fill="none" stroke={line} strokeWidth={sw} />
-          {/* three-point line: 3 ft from sideline, 23.75 ft arc from the rim */}
-          <Path
-            d={`M 3 ${COURT_H} L 3 ${fy(14.2)} A 23.75 23.75 0 0 1 47 ${fy(14.2)} L 47 ${COURT_H}`}
-            fill="none"
-            stroke={line}
-            strokeWidth={sw}
-          />
-          {/* shot markers */}
-          {shots.map((s) => {
-            const cx = s.x;
-            const cy = fy(s.y);
-            return (
-              <React.Fragment key={s.id}>
-                {isMade(s.result) ? (
-                  <Circle cx={cx} cy={cy} r={1} fill="#2f9e44" stroke="#ffffff" strokeWidth={0.15} />
-                ) : (
-                  <>
-                    <Line x1={cx - 0.9} y1={cy - 0.9} x2={cx + 0.9} y2={cy + 0.9} stroke="#e03131" strokeWidth={0.45} strokeLinecap="round" />
-                    <Line x1={cx - 0.9} y1={cy + 0.9} x2={cx + 0.9} y2={cy - 0.9} stroke="#e03131" strokeWidth={0.45} strokeLinecap="round" />
-                  </>
-                )}
-                {hasFoul(s.result) && (
-                  <Circle cx={cx} cy={cy} r={1.7} fill="none" stroke="#fab005" strokeWidth={0.3} />
-                )}
-              </React.Fragment>
-            );
-          })}
+        <Svg width={w} height={h} viewBox={`0 0 ${viewW} ${viewH}`}>
+          <G transform={ROTATION_TRANSFORMS[rotation]}>
+            <Rect x={0} y={0} width={COURT_W} height={COURT_H} fill="#ecc99e" />
+            <Rect x={0.15} y={0.15} width={COURT_W - 0.3} height={COURT_H - 0.3} fill="none" stroke={line} strokeWidth={sw} />
+            {/* paint */}
+            <Rect x={17} y={fy(19)} width={16} height={19} fill="none" stroke={line} strokeWidth={sw} />
+            {/* free throw circle */}
+            <Circle cx={25} cy={fy(19)} r={6} fill="none" stroke={line} strokeWidth={sw} />
+            {/* backboard + rim */}
+            <Line x1={22} y1={fy(4)} x2={28} y2={fy(4)} stroke={line} strokeWidth={sw * 1.5} />
+            <Circle cx={25} cy={fy(5.25)} r={0.75} fill="none" stroke="#e8590c" strokeWidth={sw} />
+            {/* restricted area */}
+            <Path d={`M 29 ${fy(5.25)} A 4 4 0 0 0 21 ${fy(5.25)}`} fill="none" stroke={line} strokeWidth={sw} />
+            {/* three-point line: 3 ft from sideline, 23.75 ft arc from the rim */}
+            <Path
+              d={`M 3 ${COURT_H} L 3 ${fy(14.2)} A 23.75 23.75 0 0 1 47 ${fy(14.2)} L 47 ${COURT_H}`}
+              fill="none"
+              stroke={line}
+              strokeWidth={sw}
+            />
+            {/* shot markers */}
+            {shots.map((s) => {
+              const cx = s.x;
+              const cy = fy(s.y);
+              return (
+                <React.Fragment key={s.id}>
+                  {isMade(s.result) ? (
+                    <Circle cx={cx} cy={cy} r={1} fill="#2f9e44" stroke="#ffffff" strokeWidth={0.15} />
+                  ) : (
+                    <>
+                      <Line x1={cx - 0.9} y1={cy - 0.9} x2={cx + 0.9} y2={cy + 0.9} stroke="#e03131" strokeWidth={0.45} strokeLinecap="round" />
+                      <Line x1={cx - 0.9} y1={cy + 0.9} x2={cx + 0.9} y2={cy - 0.9} stroke="#e03131" strokeWidth={0.45} strokeLinecap="round" />
+                    </>
+                  )}
+                  {hasFoul(s.result) && (
+                    <Circle cx={cx} cy={cy} r={1.7} fill="none" stroke="#fab005" strokeWidth={0.3} />
+                  )}
+                </React.Fragment>
+              );
+            })}
+          </G>
         </Svg>
       </View>
     </Pressable>
@@ -292,22 +326,31 @@ function ShotsScreen(props: {
   undoFT: (playerId: string) => void;
   addRebound: (playerId: string) => void;
   undoRebound: (playerId: string) => void;
+  rotation: Rotation;
+  rotateCourt: () => void;
 }) {
-  const { players, shots, freeThrows, rebounds, selected, setSelected, addPlayer, addShot, undo, addFT, undoFT, addRebound, undoRebound } = props;
+  const { players, shots, freeThrows, rebounds, selected, setSelected, addPlayer, addShot, undo, addFT, undoFT, addRebound, undoRebound, rotation, rotateCourt } = props;
   const [pending, setPending] = useState<{ x: number; y: number } | null>(null);
+  const [pendingPlayer, setPendingPlayer] = useState<string | null>(null);
+  // With "All" selected, the shooter is picked in the popup (or implied if there's only one player).
+  const shooter = selected ?? pendingPlayer ?? (players.length === 1 ? players[0].id : null);
+  const closePending = () => {
+    setPending(null);
+    setPendingPlayer(null);
+  };
   const visible = useMemo(() => shots.filter((s) => selected === null || s.playerId === selected), [shots, selected]);
 
   return (
     <View style={{ flex: 1 }}>
       <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} />
       <ScrollView contentContainerStyle={{ paddingBottom: 16 }}>
-        <Court shots={visible} onTapCourt={(x, y) => selected && setPending({ x, y })} />
+        <Court shots={visible} rotation={rotation} onTapCourt={(x, y) => players.length > 0 && setPending({ x, y })} />
         <Text style={styles.hint}>
           {selected
             ? 'Tap the court where the shot was taken.'
             : players.length === 0
             ? 'Add a player to get started.'
-            : 'Select a player to record shots and free throws.'}
+            : 'Tap the court to add a shot, or select a player to also record free throws and rebounds.'}
         </Text>
         <View style={styles.legend}>
           <Text style={styles.legendText}>● made   ✕ missed   ○ foul</Text>
@@ -321,25 +364,38 @@ function ShotsScreen(props: {
             <ReboundPanel playerId={selected} rebounds={rebounds} addRebound={addRebound} undoRebound={undoRebound} />
           </>
         )}
+        <Pressable onPress={rotateCourt} style={[styles.undo, { marginTop: 16, alignSelf: 'center' }]}>
+          <Text style={styles.btnText}>Rotate court</Text>
+        </Pressable>
       </ScrollView>
 
-      <Modal transparent animationType="fade" visible={pending !== null} onRequestClose={() => setPending(null)}>
+      <Modal transparent animationType="fade" visible={pending !== null} onRequestClose={closePending}>
         <View style={styles.backdrop}>
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Shot result</Text>
+            {selected === null && (
+              <View style={styles.shooterPicker}>
+                {players.map((p) => (
+                  <Pressable key={p.id} onPress={() => setPendingPlayer(p.id)} style={[styles.chip, shooter === p.id && styles.chipOn]}>
+                    <Text style={[styles.chipText, shooter === p.id && styles.chipTextOn]}>{p.name}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
             {RESULTS.map((r) => (
               <Pressable
                 key={r.key}
-                style={[styles.btn, isMade(r.key) ? styles.btnGreen : styles.btnRed, { marginTop: 8 }]}
+                disabled={!shooter}
+                style={[styles.btn, isMade(r.key) ? styles.btnGreen : styles.btnRed, { marginTop: 8 }, !shooter && { opacity: 0.4 }]}
                 onPress={() => {
-                  if (pending && selected) addShot({ playerId: selected, x: pending.x, y: pending.y, result: r.key });
-                  setPending(null);
+                  if (pending && shooter) addShot({ playerId: shooter, x: pending.x, y: pending.y, result: r.key });
+                  closePending();
                 }}
               >
                 <Text style={[styles.btnText, { color: '#fff' }]}>{r.label}</Text>
               </Pressable>
             ))}
-            <Pressable style={[styles.btn, styles.btnGray, { marginTop: 12 }]} onPress={() => setPending(null)}>
+            <Pressable style={[styles.btn, styles.btnGray, { marginTop: 12 }]} onPress={closePending}>
               <Text style={styles.btnText}>Cancel</Text>
             </Pressable>
           </View>
@@ -355,6 +411,10 @@ const shootingLine = (shots: Shot[]) => {
   const pct = attempts ? ` (${Math.round((100 * made) / attempts)}%)` : '';
   return `${made}/${attempts}${pct}`;
 };
+
+const totalPoints = (shots: Shot[], freeThrows: FreeThrow[]) =>
+  shots.filter((x) => isMade(x.result)).reduce((sum, x) => sum + (isThree(x) ? 3 : 2), 0) +
+  freeThrows.filter((x) => x.made).length;
 
 function StatsScreen({
   players,
@@ -376,6 +436,7 @@ function StatsScreen({
         return (
           <View key={p.id} style={styles.statCard}>
             <Text style={styles.statName}>{p.name}</Text>
+            <Text style={styles.statLine}>Points {totalPoints(s, ft)}</Text>
             <Text style={styles.statLine}>FG {shootingLine(s)}</Text>
             <Text style={styles.statLine}>3PT {shootingLine(s.filter(isThree))}</Text>
             <Text style={styles.statLine}>FT {ft.filter((x) => x.made).length}/{ft.length}</Text>
@@ -388,15 +449,50 @@ function StatsScreen({
   );
 }
 
+function AdminScreen({
+  players,
+  shots,
+  freeThrows,
+  rebounds,
+}: {
+  players: Player[];
+  shots: Shot[];
+  freeThrows: FreeThrow[];
+  rebounds: Rebound[];
+}) {
+  const exportData = async () => {
+    try {
+      await Share.share({ message: JSON.stringify({ players, shots, freeThrows, rebounds }, null, 2) });
+    } catch {
+      Alert.alert('Export failed', "Couldn't open the share sheet. Please try again.");
+    }
+  };
+
+  return (
+    <View style={{ padding: 12 }}>
+      <View style={styles.statCard}>
+        <Text style={styles.statName}>Export data</Text>
+        <Text style={styles.statSmall}>
+          Shares all players, shots, free throws and rebounds as JSON text. Save it somewhere safe to keep a copy.
+        </Text>
+        <Pressable style={[styles.btn, styles.btnBlue, { marginTop: 12 }]} onPress={exportData}>
+          <Text style={[styles.btnText, { color: '#fff' }]}>Export data</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 // ---------- App ----------
 
-type Tab = 'shots' | 'stats';
+type Tab = 'shots' | 'stats' | 'admin';
 
 export default function App() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [shots, setShots] = useState<Shot[]>([]);
   const [freeThrows, setFreeThrows] = useState<FreeThrow[]>([]);
   const [rebounds, setRebounds] = useState<Rebound[]>([]);
+  const [rotation, setRotation] = useState<Rotation>(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('shots');
   const [loaded, setLoaded] = useState(false);
@@ -420,6 +516,7 @@ export default function App() {
           setShots((d.shots ?? []).map(migrateShot));
           setFreeThrows(d.freeThrows ?? []);
           setRebounds(d.rebounds ?? []);
+          setRotation(d.rotation ?? 0);
         } catch {
           // Unreadable data: keep a copy before normal saves replace it.
           await AsyncStorage.setItem(CORRUPT_BACKUP_KEY, raw).catch(() => setSavingBlocked(true));
@@ -431,8 +528,8 @@ export default function App() {
 
   useEffect(() => {
     if (!loaded || savingBlocked) return;
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ players, shots, freeThrows, rebounds })).catch(() => {});
-  }, [players, shots, freeThrows, rebounds, loaded, savingBlocked]);
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ players, shots, freeThrows, rebounds, rotation })).catch(() => {});
+  }, [players, shots, freeThrows, rebounds, rotation, loaded, savingBlocked]);
 
   const addPlayer = (name: string) => {
     const p = { id: uid(), name };
@@ -458,6 +555,7 @@ export default function App() {
       const i = prev.map((r) => r.playerId).lastIndexOf(playerId);
       return i < 0 ? prev : prev.filter((_, idx) => idx !== i);
     });
+  const rotateCourt = () => setRotation((prev) => ((prev + 90) % 360) as Rotation);
 
   if (!loaded) return null;
 
@@ -465,7 +563,7 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView style={styles.root}>
         <StatusBar style="dark" />
-        <Text style={styles.title}>{tab === 'shots' ? 'Shots' : 'Stats'}</Text>
+        <Text style={styles.title}>{tab === 'shots' ? 'Shots' : tab === 'stats' ? 'Stats' : 'Admin'}</Text>
         {savingBlocked && (
           <Text style={styles.warning}>Couldn't access saved data. Changes won't be saved. Restart the app to try again.</Text>
         )}
@@ -485,15 +583,19 @@ export default function App() {
               undoFT={undoFT}
               addRebound={addRebound}
               undoRebound={undoRebound}
+              rotation={rotation}
+              rotateCourt={rotateCourt}
             />
           )}
           {tab === 'stats' && <StatsScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
+          {tab === 'admin' && <AdminScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
         </View>
         <View style={styles.tabBar}>
           {(
             [
               ['shots', 'Shots'],
               ['stats', 'Stats'],
+              ['admin', 'Admin'],
             ] as [Tab, string][]
           ).map(([key, label]) => (
             <Pressable key={key} style={styles.tab} onPress={() => setTab(key)}>
@@ -524,6 +626,7 @@ const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', padding: 24 },
   card: { backgroundColor: '#fff', borderRadius: 14, padding: 16 },
   cardTitle: { fontSize: 18, fontWeight: '700', textAlign: 'center' },
+  shooterPicker: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: 12, marginBottom: 4 },
   input: { borderWidth: 1, borderColor: '#ced4da', borderRadius: 8, padding: 10, fontSize: 16, marginTop: 12 },
   btn: { paddingVertical: 14, borderRadius: 10, alignItems: 'center' },
   btnText: { fontSize: 16, fontWeight: '600', color: '#212529' },
