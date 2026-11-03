@@ -610,6 +610,7 @@ function HeatMapScreen({
   setSelected,
   addPlayer,
   rotation,
+  rotateCourt,
 }: {
   players: Player[];
   shots: Shot[];
@@ -617,6 +618,7 @@ function HeatMapScreen({
   setSelected: (id: string | null) => void;
   addPlayer: (name: string) => void;
   rotation: Rotation;
+  rotateCourt: () => void;
 }) {
   const [zone, setZone] = useState<number | null>(null);
   const [zoomed, setZoomed] = useState(false);
@@ -686,6 +688,9 @@ function HeatMapScreen({
             ? `This zone: ${shootingLine(zoneShots)}`
             : 'Darker zones have more shot attempts. Tap one to see its shooting.'}
         </Text>
+        <Pressable onPress={rotateCourt} style={[styles.undo, { marginTop: 16, alignSelf: 'center' }]}>
+          <Text style={styles.btnText}>Rotate court</Text>
+        </Pressable>
       </ScrollView>
     </View>
   );
@@ -735,6 +740,53 @@ const TABS: [Tab, string][] = [
   ['heat', 'Heat Map'],
   ['admin', 'Admin'],
 ];
+
+const HEAT_ICON_OPACITY = [0.4, 0.6, 1, 0.4, 1, 0.8, 0.6, 0.8, 0.4];
+
+function TabIcon({ tab, color }: { tab: Tab; color: string }) {
+  const stroke = { stroke: color, strokeWidth: 1.8, strokeLinecap: 'round' as const, fill: 'none' };
+  return (
+    <Svg width={26} height={26} viewBox="0 0 24 24">
+      {tab === 'shots' && (
+        <>
+          <Circle cx={12} cy={12} r={9} {...stroke} />
+          <Line x1={3} y1={12} x2={21} y2={12} {...stroke} />
+          <Line x1={12} y1={3} x2={12} y2={21} {...stroke} />
+          <Path d="M5.6 5.6 C9 8.5 9 15.5 5.6 18.4" {...stroke} />
+          <Path d="M18.4 5.6 C15 8.5 15 15.5 18.4 18.4" {...stroke} />
+        </>
+      )}
+      {tab === 'stats' && (
+        <>
+          <Rect x={4} y={13} width={4} height={7} rx={1} fill={color} />
+          <Rect x={10} y={8} width={4} height={12} rx={1} fill={color} />
+          <Rect x={16} y={4} width={4} height={16} rx={1} fill={color} />
+        </>
+      )}
+      {tab === 'heat' &&
+        HEAT_ICON_OPACITY.map((opacity, i) => (
+          <Rect
+            key={i}
+            x={3 + (i % 3) * 6.5}
+            y={3 + Math.floor(i / 3) * 6.5}
+            width={5}
+            height={5}
+            rx={1}
+            fill={color}
+            opacity={opacity}
+          />
+        ))}
+      {tab === 'admin' && (
+        <>
+          <Line x1={4} y1={7} x2={20} y2={7} {...stroke} />
+          <Circle cx={15} cy={7} r={2.8} fill={color} />
+          <Line x1={4} y1={17} x2={20} y2={17} {...stroke} />
+          <Circle cx={9} cy={17} r={2.8} fill={color} />
+        </>
+      )}
+    </Svg>
+  );
+}
 
 export default function App() {
   const [players, setPlayers] = useState<Player[]>([]);
@@ -846,14 +898,22 @@ export default function App() {
                 setSelected={setSelected}
                 addPlayer={addPlayer}
                 rotation={rotation}
+                rotateCourt={rotateCourt}
               />
             )}
             {tab === 'admin' && <AdminScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
           </View>
           <View style={styles.tabBar}>
             {TABS.map(([key, label]) => (
-              <Pressable key={key} style={styles.tab} onPress={() => setTab(key)}>
-                <Text style={[styles.tabText, tab === key && styles.tabTextOn]}>{label}</Text>
+              <Pressable
+                key={key}
+                style={[styles.tab, tab === key && styles.tabOn]}
+                onPress={() => setTab(key)}
+                accessibilityRole="tab"
+                accessibilityLabel={label}
+                accessibilityState={{ selected: tab === key }}
+              >
+                <TabIcon tab={key} color={tab === key ? '#1971c2' : '#868e96'} />
               </Pressable>
             ))}
           </View>
@@ -905,7 +965,6 @@ const styles = StyleSheet.create({
   statLine: { fontSize: 16, marginTop: 2 },
   statSmall: { fontSize: 13, color: '#868e96', marginTop: 6 },
   tabBar: { flexDirection: 'row', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#ced4da', backgroundColor: '#fff' },
-  tab: { flex: 1, paddingVertical: 14, alignItems: 'center' },
-  tabText: { fontSize: 15, color: '#868e96' },
-  tabTextOn: { color: '#1971c2', fontWeight: '700' },
+  tab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderTopWidth: 2, borderTopColor: 'transparent' },
+  tabOn: { borderTopColor: '#1971c2' },
 });
