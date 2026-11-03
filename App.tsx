@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,15 @@ import Svg, { G, Rect, Circle, Line, Path } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import {
+  GestureDetector,
+  GestureHandlerRootView,
+  useCompetingGestures,
+  usePanGesture,
+  usePinchGesture,
+  useSimultaneousGestures,
+  useTapGesture,
+} from 'react-native-gesture-handler';
 
 // ---------- Types ----------
 
@@ -86,14 +95,38 @@ const unrotate = (vx: number, vy: number, rotation: Rotation): [number, number] 
   }
 };
 
-function Court({
-  shots,
+const fy = (y: number) => COURT_H - y; // flip so baseline is at the bottom
+
+const MAX_ZOOM = 4;
+const ZOOM_STEP = 1.5;
+
+// The visible part of the court: zoom level plus the top-left corner, in drawing units.
+type CourtView = { zoom: number; x: number; y: number };
+const FULL_COURT: CourtView = { zoom: 1, x: 0, y: 0 };
+
+const clamp = (n: number, min: number, max: number) => Math.min(Math.max(n, min), max);
+
+const clampView = (zoom: number, x: number, y: number, viewW: number, viewH: number): CourtView => {
+  const z = clamp(zoom, 1, MAX_ZOOM);
+  return { zoom: z, x: clamp(x, 0, viewW - viewW / z), y: clamp(y, 0, viewH - viewH / z) };
+};
+
+function CourtFrame({
   rotation,
-  onTapCourt,
+  background,
+  line,
+  onTap,
+  onZoomedChange,
+  underLines,
+  children,
 }: {
-  shots: Shot[];
   rotation: Rotation;
-  onTapCourt: (x: number, y: number) => void;
+  background: string;
+  line: string;
+  onTap: (x: number, y: number) => void;
+  onZoomedChange: (zoomed: boolean) => void;
+  underLines?: React.ReactNode;
+  children?: (zoom: number) => React.ReactNode;
 }) {
   const { width } = useWindowDimensions();
   const sideways = rotation % 180 !== 0;
@@ -101,66 +134,165 @@ function Court({
   const viewH = sideways ? COURT_W : COURT_H;
   const w = Math.min(width - 24, 600);
   const h = (w * viewH) / viewW;
-  const line = '#ffffff';
-  const sw = 0.3;
-  const fy = (y: number) => COURT_H - y; // flip so baseline is at the bottom
+  const [view, setView] = useState<CourtView>(FULL_COURT);
+  const sw = 0.3 / view.zoom;
+  const zoomed = view.zoom > 1;
+
+  // Gesture callbacks read the latest values from here.
+  const latest = useRef({ view, w, h, viewW, viewH, rotation, onTap });
+  latest.current = { view, w, h, viewW, viewH, rotation, onTap };
+  const pinchStart = useRef<{ zoom: number; focusX: number; focusY: number } | null>(null);
+
+  useEffect(() => setView(FULL_COURT), [rotation]);
+  useEffect(() => onZoomedChange(zoomed), [zoomed, onZoomedChange]);
+
+  const stepZoom = (factor: number) =>
+    setView((v) => {
+      const z = clamp(v.zoom * factor, 1, MAX_ZOOM);
+      // Keep the center of the visible area in place.
+      const x = v.x + viewW / v.zoom / 2 - viewW / z / 2;
+      const y = v.y + viewH / v.zoom / 2 - viewH / z / 2;
+      return clampView(z, x, y, viewW, viewH);
+    });
+
+  const pinch = usePinchGesture({
+    runOnJS: true,
+    onActivate: (e) => {
+      const { view: v, w: pw, h: ph, viewW: vw, viewH: vh } = latest.current;
+      pinchStart.current = {
+        zoom: v.zoom,
+        focusX: v.x + (e.focalX / pw) * (vw / v.zoom),
+        focusY: v.y + (e.focalY / ph) * (vh / v.zoom),
+      };
+    },
+    onUpdate: (e) => {
+      const start = pinchStart.current;
+      if (!start) return;
+      const { w: pw, h: ph, viewW: vw, viewH: vh } = latest.current;
+      // Keep the court point that started under the fingers under them.
+      const z = clamp(start.zoom * e.scale, 1, MAX_ZOOM);
+      setView(clampView(z, start.focusX - (e.focalX / pw) * (vw / z), start.focusY - (e.focalY / ph) * (vh / z), vw, vh));
+    },
+    onFinalize: () => {
+      pinchStart.current = null;
+      setView((v) => (v.zoom < 1.05 ? FULL_COURT : v));
+    },
+  });
+  const pan = usePanGesture({
+    runOnJS: true,
+    enabled: zoomed,
+    maxPointers: 1,
+    onUpdate: (e) => {
+      if (pinchStart.current) return;
+      const { w: pw, h: ph, viewW: vw, viewH: vh } = latest.current;
+      setView((v) =>
+        clampView(v.zoom, v.x - (e.changeX / pw) * (vw / v.zoom), v.y - (e.changeY / ph) * (vh / v.zoom), vw, vh),
+      );
+    },
+  });
+  const tap = useTapGesture({
+    runOnJS: true,
+    onActivate: (e) => {
+      const { view: v, w: pw, h: ph, viewW: vw, viewH: vh, rotation: r, onTap: tapped } = latest.current;
+      const [cx, cy] = unrotate(v.x + (e.x / pw) * (vw / v.zoom), v.y + (e.y / ph) * (vh / v.zoom), r);
+      tapped(clamp(cx, 0, COURT_W), clamp(COURT_H - cy, 0, COURT_H));
+    },
+  });
+  const moves = useSimultaneousGestures(pinch, pan);
+  const gesture = useCompetingGestures(moves, tap);
 
   return (
-    <Pressable
-      style={{ width: w, height: h, alignSelf: 'center', borderRadius: 8, overflow: 'hidden' }}
-      onPress={(e) => {
-        const { locationX, locationY } = e.nativeEvent;
-        const [cx, cy] = unrotate((locationX / w) * viewW, (locationY / h) * viewH, rotation);
-        const x = Math.min(Math.max(cx, 0), COURT_W);
-        const y = Math.min(Math.max(COURT_H - cy, 0), COURT_H);
-        onTapCourt(x, y);
-      }}
-    >
-      <View pointerEvents="none">
-        <Svg width={w} height={h} viewBox={`0 0 ${viewW} ${viewH}`}>
-          <G transform={ROTATION_TRANSFORMS[rotation]}>
-            <Rect x={0} y={0} width={COURT_W} height={COURT_H} fill="#ecc99e" />
-            <Rect x={0.15} y={0.15} width={COURT_W - 0.3} height={COURT_H - 0.3} fill="none" stroke={line} strokeWidth={sw} />
-            {/* paint */}
-            <Rect x={17} y={fy(19)} width={16} height={19} fill="none" stroke={line} strokeWidth={sw} />
-            {/* free throw circle */}
-            <Circle cx={25} cy={fy(19)} r={6} fill="none" stroke={line} strokeWidth={sw} />
-            {/* backboard + rim */}
-            <Line x1={22} y1={fy(4)} x2={28} y2={fy(4)} stroke={line} strokeWidth={sw * 1.5} />
-            <Circle cx={25} cy={fy(5.25)} r={0.75} fill="none" stroke="#e8590c" strokeWidth={sw} />
-            {/* restricted area */}
-            <Path d={`M 29 ${fy(5.25)} A 4 4 0 0 0 21 ${fy(5.25)}`} fill="none" stroke={line} strokeWidth={sw} />
-            {/* three-point line: 3 ft from sideline, 23.75 ft arc from the rim */}
-            <Path
-              d={`M 3 ${COURT_H} L 3 ${fy(14.2)} A 23.75 23.75 0 0 1 47 ${fy(14.2)} L 47 ${COURT_H}`}
-              fill="none"
-              stroke={line}
-              strokeWidth={sw}
-            />
-            {/* shot markers */}
-            {shots.map((s) => {
-              const cx = s.x;
-              const cy = fy(s.y);
-              return (
-                <React.Fragment key={s.id}>
-                  {isMade(s.result) ? (
-                    <Circle cx={cx} cy={cy} r={1} fill="#2f9e44" stroke="#ffffff" strokeWidth={0.15} />
-                  ) : (
-                    <>
-                      <Line x1={cx - 0.9} y1={cy - 0.9} x2={cx + 0.9} y2={cy + 0.9} stroke="#e03131" strokeWidth={0.45} strokeLinecap="round" />
-                      <Line x1={cx - 0.9} y1={cy + 0.9} x2={cx + 0.9} y2={cy - 0.9} stroke="#e03131" strokeWidth={0.45} strokeLinecap="round" />
-                    </>
-                  )}
-                  {hasFoul(s.result) && (
-                    <Circle cx={cx} cy={cy} r={1.7} fill="none" stroke="#fab005" strokeWidth={0.3} />
-                  )}
-                </React.Fragment>
-              );
-            })}
-          </G>
-        </Svg>
+    <View>
+      <GestureDetector gesture={gesture}>
+        <View collapsable={false} style={{ width: w, height: h, alignSelf: 'center', borderRadius: 8, overflow: 'hidden' }}>
+          <View pointerEvents="none">
+            <Svg width={w} height={h} viewBox={`${view.x} ${view.y} ${viewW / view.zoom} ${viewH / view.zoom}`}>
+              <G transform={ROTATION_TRANSFORMS[rotation]}>
+                <Rect x={0} y={0} width={COURT_W} height={COURT_H} fill={background} />
+                {underLines}
+                <Rect x={0.15} y={0.15} width={COURT_W - 0.3} height={COURT_H - 0.3} fill="none" stroke={line} strokeWidth={sw} />
+                {/* paint */}
+                <Rect x={17} y={fy(19)} width={16} height={19} fill="none" stroke={line} strokeWidth={sw} />
+                {/* free throw circle */}
+                <Circle cx={25} cy={fy(19)} r={6} fill="none" stroke={line} strokeWidth={sw} />
+                {/* backboard + rim */}
+                <Line x1={22} y1={fy(4)} x2={28} y2={fy(4)} stroke={line} strokeWidth={sw * 1.5} />
+                <Circle cx={25} cy={fy(5.25)} r={0.75} fill="none" stroke="#e8590c" strokeWidth={sw} />
+                {/* restricted area */}
+                <Path d={`M 29 ${fy(5.25)} A 4 4 0 0 0 21 ${fy(5.25)}`} fill="none" stroke={line} strokeWidth={sw} />
+                {/* three-point line: 3 ft from sideline, 23.75 ft arc from the rim */}
+                <Path
+                  d={`M 3 ${COURT_H} L 3 ${fy(14.2)} A 23.75 23.75 0 0 1 47 ${fy(14.2)} L 47 ${COURT_H}`}
+                  fill="none"
+                  stroke={line}
+                  strokeWidth={sw}
+                />
+                {children?.(view.zoom)}
+              </G>
+            </Svg>
+          </View>
+        </View>
+      </GestureDetector>
+      <View style={styles.zoomBar}>
+        <Pressable
+          onPress={() => stepZoom(1 / ZOOM_STEP)}
+          disabled={!zoomed}
+          style={[styles.undo, styles.zoomBtn, !zoomed && { opacity: 0.4 }]}
+        >
+          <Text style={styles.btnText}>−</Text>
+        </Pressable>
+        <Text style={styles.zoomLabel}>{Math.round(view.zoom * 100)}%</Text>
+        <Pressable
+          onPress={() => stepZoom(ZOOM_STEP)}
+          disabled={view.zoom >= MAX_ZOOM}
+          style={[styles.undo, styles.zoomBtn, view.zoom >= MAX_ZOOM && { opacity: 0.4 }]}
+        >
+          <Text style={styles.btnText}>+</Text>
+        </Pressable>
+        <Pressable onPress={() => setView(FULL_COURT)} disabled={!zoomed} style={[styles.undo, !zoomed && { opacity: 0.4 }]}>
+          <Text style={styles.btnText}>Reset</Text>
+        </Pressable>
       </View>
-    </Pressable>
+    </View>
+  );
+}
+
+function Court({
+  shots,
+  rotation,
+  onTapCourt,
+  onZoomedChange,
+}: {
+  shots: Shot[];
+  rotation: Rotation;
+  onTapCourt: (x: number, y: number) => void;
+  onZoomedChange: (zoomed: boolean) => void;
+}) {
+  return (
+    <CourtFrame rotation={rotation} background="#ecc99e" line="#ffffff" onTap={onTapCourt} onZoomedChange={onZoomedChange}>
+      {(zoom) => {
+        const m = 1 / zoom; // keeps markers the same size on screen while zoomed
+        return shots.map((s) => {
+          const cx = s.x;
+          const cy = fy(s.y);
+          return (
+            <React.Fragment key={s.id}>
+              {isMade(s.result) ? (
+                <Circle cx={cx} cy={cy} r={m} fill="#2f9e44" stroke="#ffffff" strokeWidth={0.15 * m} />
+              ) : (
+                <>
+                  <Line x1={cx - 0.9 * m} y1={cy - 0.9 * m} x2={cx + 0.9 * m} y2={cy + 0.9 * m} stroke="#e03131" strokeWidth={0.45 * m} strokeLinecap="round" />
+                  <Line x1={cx - 0.9 * m} y1={cy + 0.9 * m} x2={cx + 0.9 * m} y2={cy - 0.9 * m} stroke="#e03131" strokeWidth={0.45 * m} strokeLinecap="round" />
+                </>
+              )}
+              {hasFoul(s.result) && (
+                <Circle cx={cx} cy={cy} r={1.7 * m} fill="none" stroke="#fab005" strokeWidth={0.3 * m} />
+              )}
+            </React.Fragment>
+          );
+        });
+      }}
+    </CourtFrame>
   );
 }
 
@@ -332,6 +464,7 @@ function ShotsScreen(props: {
   const { players, shots, freeThrows, rebounds, selected, setSelected, addPlayer, addShot, undo, addFT, undoFT, addRebound, undoRebound, rotation, rotateCourt } = props;
   const [pending, setPending] = useState<{ x: number; y: number } | null>(null);
   const [pendingPlayer, setPendingPlayer] = useState<string | null>(null);
+  const [zoomed, setZoomed] = useState(false);
   // With "All" selected, the shooter is picked in the popup (or implied if there's only one player).
   const shooter = selected ?? pendingPlayer ?? (players.length === 1 ? players[0].id : null);
   const closePending = () => {
@@ -343,8 +476,16 @@ function ShotsScreen(props: {
   return (
     <View style={{ flex: 1 }}>
       <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} />
-      <ScrollView contentContainerStyle={{ paddingBottom: 16 }}>
-        <Court shots={visible} rotation={rotation} onTapCourt={(x, y) => players.length > 0 && setPending({ x, y })} />
+      {/* While zoomed, dragging the court moves it, so the page itself doesn't scroll. */}
+      <ScrollView scrollEnabled={!zoomed} contentContainerStyle={{ paddingBottom: 16 }}>
+        <Court
+          shots={visible}
+          rotation={rotation}
+          onTapCourt={(x, y) => {
+            if (players.length > 0) setPending({ x, y });
+          }}
+          onZoomedChange={setZoomed}
+        />
         <Text style={styles.hint}>
           {selected
             ? 'Tap the court where the shot was taken.'
@@ -449,6 +590,107 @@ function StatsScreen({
   );
 }
 
+const ZONE_COLS = 11; // odd, so a zone is centered on the rim
+const ZONE_ROWS = 10;
+const ZONE_W = COURT_W / ZONE_COLS;
+const ZONE_H = COURT_H / ZONE_ROWS;
+const ZONE_GAP = 0.26; // about 2px between zones on a phone
+const HEAT_RAMP = ['#cde2fb', '#9ec5f4', '#5598e7', '#256abf', '#0d366b']; // fewer to more shots
+
+const zoneAt = (x: number, y: number) =>
+  Math.min(Math.floor(x / ZONE_W), ZONE_COLS - 1) + Math.min(Math.floor(y / ZONE_H), ZONE_ROWS - 1) * ZONE_COLS;
+const zoneCol = (zone: number) => zone % ZONE_COLS;
+const zoneRow = (zone: number) => Math.floor(zone / ZONE_COLS);
+const heatColor = (count: number, max: number) => HEAT_RAMP[Math.ceil((count / max) * HEAT_RAMP.length) - 1];
+
+function HeatMapScreen({
+  players,
+  shots,
+  selected,
+  setSelected,
+  addPlayer,
+  rotation,
+}: {
+  players: Player[];
+  shots: Shot[];
+  selected: string | null;
+  setSelected: (id: string | null) => void;
+  addPlayer: (name: string) => void;
+  rotation: Rotation;
+}) {
+  const [zone, setZone] = useState<number | null>(null);
+  const [zoomed, setZoomed] = useState(false);
+  const zones = useMemo(() => {
+    const byZone = new Map<number, Shot[]>();
+    for (const s of shots) {
+      if ((selected !== null && s.playerId !== selected) || !isFieldGoalAttempt(s.result)) continue;
+      const i = zoneAt(s.x, s.y);
+      byZone.set(i, [...(byZone.get(i) ?? []), s]);
+    }
+    return byZone;
+  }, [shots, selected]);
+  const max = Math.max(0, ...Array.from(zones.values(), (z) => z.length));
+  const zoneShots = zone === null ? undefined : zones.get(zone);
+
+  return (
+    <View style={{ flex: 1 }}>
+      <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} />
+      <ScrollView scrollEnabled={!zoomed} contentContainerStyle={{ paddingBottom: 16 }}>
+        <CourtFrame
+          rotation={rotation}
+          background="#ffffff"
+          line="#868e96"
+          onTap={(x, y) => setZone(zoneAt(x, y))}
+          onZoomedChange={setZoomed}
+          underLines={Array.from(zones, ([i, z]) => (
+            <Rect
+              key={i}
+              x={zoneCol(i) * ZONE_W + ZONE_GAP / 2}
+              y={fy((zoneRow(i) + 1) * ZONE_H) + ZONE_GAP / 2}
+              width={ZONE_W - ZONE_GAP}
+              height={ZONE_H - ZONE_GAP}
+              rx={0.3}
+              fill={heatColor(z.length, max)}
+            />
+          ))}
+        >
+          {(courtZoom) =>
+            zone !== null &&
+            zoneShots && (
+              <Rect
+                x={zoneCol(zone) * ZONE_W}
+                y={fy((zoneRow(zone) + 1) * ZONE_H)}
+                width={ZONE_W}
+                height={ZONE_H}
+                rx={0.3}
+                fill="none"
+                stroke="#212529"
+                strokeWidth={0.4 / courtZoom}
+              />
+            )
+          }
+        </CourtFrame>
+        {max > 1 && (
+          <View style={styles.heatLegend}>
+            <Text style={styles.legendText}>Fewest: 1</Text>
+            {HEAT_RAMP.map((color) => (
+              <View key={color} style={[styles.heatSwatch, { backgroundColor: color }]} />
+            ))}
+            <Text style={styles.legendText}>Most: {max}</Text>
+          </View>
+        )}
+        <Text style={styles.hint}>
+          {max === 0
+            ? 'No shots to show yet.'
+            : zoneShots
+            ? `This zone: ${shootingLine(zoneShots)}`
+            : 'Darker zones have more shot attempts. Tap one to see its shooting.'}
+        </Text>
+      </ScrollView>
+    </View>
+  );
+}
+
 function AdminScreen({
   players,
   shots,
@@ -485,7 +727,14 @@ function AdminScreen({
 
 // ---------- App ----------
 
-type Tab = 'shots' | 'stats' | 'admin';
+type Tab = 'shots' | 'stats' | 'heat' | 'admin';
+
+const TABS: [Tab, string][] = [
+  ['shots', 'Shots'],
+  ['stats', 'Stats'],
+  ['heat', 'Heat Map'],
+  ['admin', 'Admin'],
+];
 
 export default function App() {
   const [players, setPlayers] = useState<Player[]>([]);
@@ -560,51 +809,57 @@ export default function App() {
   if (!loaded) return null;
 
   return (
-    <SafeAreaProvider>
-      <SafeAreaView style={styles.root}>
-        <StatusBar style="dark" />
-        <Text style={styles.title}>{tab === 'shots' ? 'Shots' : tab === 'stats' ? 'Stats' : 'Admin'}</Text>
-        {savingBlocked && (
-          <Text style={styles.warning}>Couldn't access saved data. Changes won't be saved. Restart the app to try again.</Text>
-        )}
-        <View style={{ flex: 1 }}>
-          {tab === 'shots' && (
-            <ShotsScreen
-              players={players}
-              shots={shots}
-              freeThrows={freeThrows}
-              rebounds={rebounds}
-              selected={selected}
-              setSelected={setSelected}
-              addPlayer={addPlayer}
-              addShot={addShot}
-              undo={undoShot}
-              addFT={addFT}
-              undoFT={undoFT}
-              addRebound={addRebound}
-              undoRebound={undoRebound}
-              rotation={rotation}
-              rotateCourt={rotateCourt}
-            />
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.root}>
+          <StatusBar style="dark" />
+          <Text style={styles.title}>{TABS.find(([key]) => key === tab)?.[1]}</Text>
+          {savingBlocked && (
+            <Text style={styles.warning}>Couldn't access saved data. Changes won't be saved. Restart the app to try again.</Text>
           )}
-          {tab === 'stats' && <StatsScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
-          {tab === 'admin' && <AdminScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
-        </View>
-        <View style={styles.tabBar}>
-          {(
-            [
-              ['shots', 'Shots'],
-              ['stats', 'Stats'],
-              ['admin', 'Admin'],
-            ] as [Tab, string][]
-          ).map(([key, label]) => (
-            <Pressable key={key} style={styles.tab} onPress={() => setTab(key)}>
-              <Text style={[styles.tabText, tab === key && styles.tabTextOn]}>{label}</Text>
-            </Pressable>
-          ))}
-        </View>
-      </SafeAreaView>
-    </SafeAreaProvider>
+          <View style={{ flex: 1 }}>
+            {tab === 'shots' && (
+              <ShotsScreen
+                players={players}
+                shots={shots}
+                freeThrows={freeThrows}
+                rebounds={rebounds}
+                selected={selected}
+                setSelected={setSelected}
+                addPlayer={addPlayer}
+                addShot={addShot}
+                undo={undoShot}
+                addFT={addFT}
+                undoFT={undoFT}
+                addRebound={addRebound}
+                undoRebound={undoRebound}
+                rotation={rotation}
+                rotateCourt={rotateCourt}
+              />
+            )}
+            {tab === 'stats' && <StatsScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
+            {tab === 'heat' && (
+              <HeatMapScreen
+                players={players}
+                shots={shots}
+                selected={selected}
+                setSelected={setSelected}
+                addPlayer={addPlayer}
+                rotation={rotation}
+              />
+            )}
+            {tab === 'admin' && <AdminScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
+          </View>
+          <View style={styles.tabBar}>
+            {TABS.map(([key, label]) => (
+              <Pressable key={key} style={styles.tab} onPress={() => setTab(key)}>
+                <Text style={[styles.tabText, tab === key && styles.tabTextOn]}>{label}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </SafeAreaView>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
@@ -622,6 +877,11 @@ const styles = StyleSheet.create({
   hint: { textAlign: 'center', color: '#868e96', marginTop: 12, paddingHorizontal: 16 },
   legend: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, marginTop: 10 },
   legendText: { color: '#495057' },
+  zoomBar: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 10 },
+  zoomBtn: { width: 44, alignItems: 'center' },
+  zoomLabel: { width: 52, textAlign: 'center', color: '#495057' },
+  heatLegend: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 2, marginTop: 12 },
+  heatSwatch: { width: 24, height: 12, borderRadius: 2 },
   undo: { backgroundColor: '#dee2e6', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', padding: 24 },
   card: { backgroundColor: '#fff', borderRadius: 14, padding: 16 },
