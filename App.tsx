@@ -42,7 +42,7 @@ const hasFoul = (r: ShotResult) => r === 'madeFoul' || r === 'missedFoul';
 const isFieldGoalAttempt = (r: ShotResult) => r !== 'missedFoul';
 
 type Player = { id: string; name: string };
-// x: 0..50 ft (left to right), y: 0..47 ft (baseline up)
+// x: 0..50 ft (left to right), y: 0..94 ft (near baseline up)
 type Shot = { id: string; playerId: string; x: number; y: number; result: ShotResult; date: number };
 type FreeThrow = { id: string; playerId: string; made: boolean; date: number };
 type ReboundKind = 'offensive' | 'defensive';
@@ -73,12 +73,14 @@ const migrateShot = (s: Omit<Shot, 'result'> & { result: string }): Shot => ({
 // ---------- Court ----------
 
 const COURT_W = 50;
-const COURT_H = 47;
+const COURT_H = 94;
+const HALF_COURT = COURT_H / 2;
 const RIM_X = 25;
-const RIM_Y = 5.25;
+const RIM_Y = 5.25; // distance of each rim from its baseline
 const THREE_ARC_RADIUS = 23.75;
 const THREE_CORNER_X = 3; // distance of the corner three lines from each sideline
 
+// Measured from the near rim, so every shot from the far half counts as a three.
 const isThree = (s: Shot) =>
   s.x < THREE_CORNER_X ||
   s.x > COURT_W - THREE_CORNER_X ||
@@ -114,22 +116,61 @@ const MAX_ZOOM = 4;
 const ZOOM_STEP = 1.5;
 
 // The visible part of the court: zoom level plus the top-left corner, in drawing units.
+// At zoom 1 it shows half the court.
 type CourtView = { zoom: number; x: number; y: number };
-const FULL_COURT: CourtView = { zoom: 1, x: 0, y: 0 };
+
+// The near half, wherever the rotation puts it in the drawing.
+const defaultView = (rotation: Rotation): CourtView => ({
+  zoom: 1,
+  x: rotation === 270 ? HALF_COURT : 0,
+  y: rotation === 0 ? HALF_COURT : 0,
+});
 
 const clamp = (n: number, min: number, max: number) => Math.min(Math.max(n, min), max);
 
-const clampView = (zoom: number, x: number, y: number, viewW: number, viewH: number): CourtView => {
+const clampView = (
+  zoom: number,
+  x: number,
+  y: number,
+  viewW: number,
+  viewH: number,
+  baseW: number,
+  baseH: number,
+): CourtView => {
   const z = clamp(zoom, 1, MAX_ZOOM);
-  return { zoom: z, x: clamp(x, 0, viewW - viewW / z), y: clamp(y, 0, viewH - viewH / z) };
+  return { zoom: z, x: clamp(x, 0, viewW - baseW / z), y: clamp(y, 0, viewH - baseH / z) };
 };
+
+// One half's markings, drawn for the near baseline.
+function HalfCourtLines({ line, sw }: { line: string; sw: number }) {
+  return (
+    <>
+      {/* paint */}
+      <Rect x={17} y={fy(19)} width={16} height={19} fill="none" stroke={line} strokeWidth={sw} />
+      {/* free throw circle */}
+      <Circle cx={25} cy={fy(19)} r={6} fill="none" stroke={line} strokeWidth={sw} />
+      {/* backboard + rim */}
+      <Line x1={22} y1={fy(4)} x2={28} y2={fy(4)} stroke={line} strokeWidth={sw * 1.5} />
+      <Circle cx={25} cy={fy(RIM_Y)} r={0.75} fill="none" stroke="#e8590c" strokeWidth={sw} />
+      {/* restricted area */}
+      <Path d={`M 29 ${fy(RIM_Y)} A 4 4 0 0 0 21 ${fy(RIM_Y)}`} fill="none" stroke={line} strokeWidth={sw} />
+      {/* three-point line: 3 ft from sideline, 23.75 ft arc from the rim */}
+      <Path
+        d={`M 3 ${COURT_H} L 3 ${fy(14.2)} A 23.75 23.75 0 0 1 47 ${fy(14.2)} L 47 ${COURT_H}`}
+        fill="none"
+        stroke={line}
+        strokeWidth={sw}
+      />
+    </>
+  );
+}
 
 function CourtFrame({
   rotation,
   background,
   line,
   onTap,
-  onZoomedChange,
+  onTouchingChange,
   underLines,
   children,
 }: {
@@ -137,77 +178,95 @@ function CourtFrame({
   background: string;
   line: string;
   onTap: (x: number, y: number) => void;
-  onZoomedChange: (zoomed: boolean) => void;
+  onTouchingChange: (touching: boolean) => void;
   underLines?: React.ReactNode;
   children?: (zoom: number) => React.ReactNode;
 }) {
   const { width } = useWindowDimensions();
   const sideways = rotation % 180 !== 0;
+  // The whole court, and the part of it visible at zoom 1 (half).
   const viewW = sideways ? COURT_H : COURT_W;
   const viewH = sideways ? COURT_W : COURT_H;
+  const baseW = sideways ? HALF_COURT : COURT_W;
+  const baseH = sideways ? COURT_W : HALF_COURT;
   const w = Math.min(width - 24, 600);
-  const h = (w * viewH) / viewW;
-  const [view, setView] = useState<CourtView>(FULL_COURT);
+  const h = (w * baseH) / baseW;
+  const [view, setView] = useState<CourtView>(() => defaultView(rotation));
   const sw = 0.3 / view.zoom;
-  const zoomed = view.zoom > 1;
+  const home = defaultView(rotation);
+  const atHome = view.zoom === home.zoom && view.x === home.x && view.y === home.y;
 
   // Gesture callbacks read the latest values from here.
-  const latest = useRef({ view, w, h, viewW, viewH, rotation, onTap });
-  latest.current = { view, w, h, viewW, viewH, rotation, onTap };
+  const latest = useRef({ view, w, h, viewW, viewH, baseW, baseH, rotation, onTap, onTouchingChange });
+  latest.current = { view, w, h, viewW, viewH, baseW, baseH, rotation, onTap, onTouchingChange };
   const pinchStart = useRef<{ zoom: number; focusX: number; focusY: number } | null>(null);
+  const activeGestures = useRef(0);
 
-  useEffect(() => setView(FULL_COURT), [rotation]);
-  useEffect(() => onZoomedChange(zoomed), [zoomed, onZoomedChange]);
+  // While a finger is on the court, the page stops scrolling so dragging moves the court.
+  const gestureBegan = () => {
+    activeGestures.current += 1;
+    latest.current.onTouchingChange(true);
+  };
+  const gestureEnded = () => {
+    activeGestures.current = Math.max(activeGestures.current - 1, 0);
+    if (activeGestures.current === 0) latest.current.onTouchingChange(false);
+  };
+
+  useEffect(() => setView(defaultView(rotation)), [rotation]);
 
   const stepZoom = (factor: number) =>
     setView((v) => {
       const z = clamp(v.zoom * factor, 1, MAX_ZOOM);
       // Keep the center of the visible area in place.
-      const x = v.x + viewW / v.zoom / 2 - viewW / z / 2;
-      const y = v.y + viewH / v.zoom / 2 - viewH / z / 2;
-      return clampView(z, x, y, viewW, viewH);
+      const x = v.x + baseW / v.zoom / 2 - baseW / z / 2;
+      const y = v.y + baseH / v.zoom / 2 - baseH / z / 2;
+      return clampView(z, x, y, viewW, viewH, baseW, baseH);
     });
 
   const pinch = usePinchGesture({
     runOnJS: true,
+    onBegin: gestureBegan,
     onActivate: (e) => {
-      const { view: v, w: pw, h: ph, viewW: vw, viewH: vh } = latest.current;
+      const { view: v, w: pw, h: ph, baseW: bw, baseH: bh } = latest.current;
       pinchStart.current = {
         zoom: v.zoom,
-        focusX: v.x + (e.focalX / pw) * (vw / v.zoom),
-        focusY: v.y + (e.focalY / ph) * (vh / v.zoom),
+        focusX: v.x + (e.focalX / pw) * (bw / v.zoom),
+        focusY: v.y + (e.focalY / ph) * (bh / v.zoom),
       };
     },
     onUpdate: (e) => {
       const start = pinchStart.current;
       if (!start) return;
-      const { w: pw, h: ph, viewW: vw, viewH: vh } = latest.current;
+      const { w: pw, h: ph, viewW: vw, viewH: vh, baseW: bw, baseH: bh } = latest.current;
       // Keep the court point that started under the fingers under them.
       const z = clamp(start.zoom * e.scale, 1, MAX_ZOOM);
-      setView(clampView(z, start.focusX - (e.focalX / pw) * (vw / z), start.focusY - (e.focalY / ph) * (vh / z), vw, vh));
+      setView(clampView(z, start.focusX - (e.focalX / pw) * (bw / z), start.focusY - (e.focalY / ph) * (bh / z), vw, vh, bw, bh));
     },
     onFinalize: () => {
       pinchStart.current = null;
-      setView((v) => (v.zoom < 1.05 ? FULL_COURT : v));
+      gestureEnded();
+      const { viewW: vw, viewH: vh, baseW: bw, baseH: bh } = latest.current;
+      setView((v) => (v.zoom < 1.05 ? clampView(1, v.x, v.y, vw, vh, bw, bh) : v));
     },
   });
   const pan = usePanGesture({
     runOnJS: true,
-    enabled: zoomed,
     maxPointers: 1,
+    onBegin: gestureBegan,
     onUpdate: (e) => {
       if (pinchStart.current) return;
-      const { w: pw, h: ph, viewW: vw, viewH: vh } = latest.current;
+      const { w: pw, h: ph, viewW: vw, viewH: vh, baseW: bw, baseH: bh } = latest.current;
       setView((v) =>
-        clampView(v.zoom, v.x - (e.changeX / pw) * (vw / v.zoom), v.y - (e.changeY / ph) * (vh / v.zoom), vw, vh),
+        clampView(v.zoom, v.x - (e.changeX / pw) * (bw / v.zoom), v.y - (e.changeY / ph) * (bh / v.zoom), vw, vh, bw, bh),
       );
     },
+    onFinalize: gestureEnded,
   });
   const tap = useTapGesture({
     runOnJS: true,
     onActivate: (e) => {
-      const { view: v, w: pw, h: ph, viewW: vw, viewH: vh, rotation: r, onTap: tapped } = latest.current;
-      const [cx, cy] = unrotate(v.x + (e.x / pw) * (vw / v.zoom), v.y + (e.y / ph) * (vh / v.zoom), r);
+      const { view: v, w: pw, h: ph, baseW: bw, baseH: bh, rotation: r, onTap: tapped } = latest.current;
+      const [cx, cy] = unrotate(v.x + (e.x / pw) * (bw / v.zoom), v.y + (e.y / ph) * (bh / v.zoom), r);
       tapped(clamp(cx, 0, COURT_W), clamp(COURT_H - cy, 0, COURT_H));
     },
   });
@@ -219,38 +278,30 @@ function CourtFrame({
       <GestureDetector gesture={gesture}>
         <View collapsable={false} style={{ width: w, height: h, alignSelf: 'center', borderRadius: 8, overflow: 'hidden' }}>
           <View pointerEvents="none">
-            <Svg width={w} height={h} viewBox={`${view.x} ${view.y} ${viewW / view.zoom} ${viewH / view.zoom}`}>
+            <Svg width={w} height={h} viewBox={`${view.x} ${view.y} ${baseW / view.zoom} ${baseH / view.zoom}`}>
               <G transform={ROTATION_TRANSFORMS[rotation]}>
                 <Rect x={0} y={0} width={COURT_W} height={COURT_H} fill={background} />
                 {underLines}
                 <Rect x={0.15} y={0.15} width={COURT_W - 0.3} height={COURT_H - 0.3} fill="none" stroke={line} strokeWidth={sw} />
-                {/* paint */}
-                <Rect x={17} y={fy(19)} width={16} height={19} fill="none" stroke={line} strokeWidth={sw} />
-                {/* free throw circle */}
-                <Circle cx={25} cy={fy(19)} r={6} fill="none" stroke={line} strokeWidth={sw} />
-                {/* backboard + rim */}
-                <Line x1={22} y1={fy(4)} x2={28} y2={fy(4)} stroke={line} strokeWidth={sw * 1.5} />
-                <Circle cx={25} cy={fy(5.25)} r={0.75} fill="none" stroke="#e8590c" strokeWidth={sw} />
-                {/* restricted area */}
-                <Path d={`M 29 ${fy(5.25)} A 4 4 0 0 0 21 ${fy(5.25)}`} fill="none" stroke={line} strokeWidth={sw} />
-                {/* three-point line: 3 ft from sideline, 23.75 ft arc from the rim */}
-                <Path
-                  d={`M 3 ${COURT_H} L 3 ${fy(14.2)} A 23.75 23.75 0 0 1 47 ${fy(14.2)} L 47 ${COURT_H}`}
-                  fill="none"
-                  stroke={line}
-                  strokeWidth={sw}
-                />
+                {/* half court line + center circle */}
+                <Line x1={0} y1={HALF_COURT} x2={COURT_W} y2={HALF_COURT} stroke={line} strokeWidth={sw} />
+                <Circle cx={25} cy={HALF_COURT} r={6} fill="none" stroke={line} strokeWidth={sw} />
+                <HalfCourtLines line={line} sw={sw} />
+                <G transform={`translate(${COURT_W},${COURT_H}) rotate(180)`}>
+                  <HalfCourtLines line={line} sw={sw} />
+                </G>
                 {children?.(view.zoom)}
               </G>
             </Svg>
           </View>
         </View>
       </GestureDetector>
+      <Text style={[styles.legendText, { textAlign: 'center', marginTop: 8 }]}>Drag the court to see the other half.</Text>
       <View style={styles.zoomBar}>
         <Pressable
           onPress={() => stepZoom(1 / ZOOM_STEP)}
-          disabled={!zoomed}
-          style={[styles.undo, styles.zoomBtn, !zoomed && { opacity: 0.4 }]}
+          disabled={view.zoom <= 1}
+          style={[styles.undo, styles.zoomBtn, view.zoom <= 1 && { opacity: 0.4 }]}
         >
           <Text style={styles.btnText}>−</Text>
         </Pressable>
@@ -262,7 +313,7 @@ function CourtFrame({
         >
           <Text style={styles.btnText}>+</Text>
         </Pressable>
-        <Pressable onPress={() => setView(FULL_COURT)} disabled={!zoomed} style={[styles.undo, !zoomed && { opacity: 0.4 }]}>
+        <Pressable onPress={() => setView(home)} disabled={atHome} style={[styles.undo, atHome && { opacity: 0.4 }]}>
           <Text style={styles.btnText}>Reset</Text>
         </Pressable>
       </View>
@@ -274,15 +325,15 @@ function Court({
   shots,
   rotation,
   onTapCourt,
-  onZoomedChange,
+  onTouchingChange,
 }: {
   shots: Shot[];
   rotation: Rotation;
   onTapCourt: (x: number, y: number) => void;
-  onZoomedChange: (zoomed: boolean) => void;
+  onTouchingChange: (touching: boolean) => void;
 }) {
   return (
-    <CourtFrame rotation={rotation} background="#ecc99e" line="#ffffff" onTap={onTapCourt} onZoomedChange={onZoomedChange}>
+    <CourtFrame rotation={rotation} background="#ecc99e" line="#ffffff" onTap={onTapCourt} onTouchingChange={onTouchingChange}>
       {(zoom) => {
         const m = 1 / zoom; // keeps markers the same size on screen while zoomed
         return shots.map((s) => {
@@ -482,7 +533,7 @@ function ShotsScreen(props: {
   const { players, shots, freeThrows, rebounds, selected, setSelected, addPlayer, addShot, undo, addFT, undoFT, addRebound, undoRebound, rotation, rotateCourt } = props;
   const [pending, setPending] = useState<{ x: number; y: number } | null>(null);
   const [pendingPlayer, setPendingPlayer] = useState<string | null>(null);
-  const [zoomed, setZoomed] = useState(false);
+  const [touchingCourt, setTouchingCourt] = useState(false);
   // With "All" selected, the shooter is picked in the popup (or implied if there's only one player).
   const shooter = selected ?? pendingPlayer ?? (players.length === 1 ? players[0].id : null);
   const closePending = () => {
@@ -494,15 +545,14 @@ function ShotsScreen(props: {
   return (
     <View style={{ flex: 1 }}>
       <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} />
-      {/* While zoomed, dragging the court moves it, so the page itself doesn't scroll. */}
-      <ScrollView scrollEnabled={!zoomed} contentContainerStyle={{ paddingBottom: 16 }}>
+      <ScrollView scrollEnabled={!touchingCourt} contentContainerStyle={{ paddingBottom: 16 }}>
         <Court
           shots={visible}
           rotation={rotation}
           onTapCourt={(x, y) => {
             if (players.length > 0) setPending({ x, y });
           }}
-          onZoomedChange={setZoomed}
+          onTouchingChange={setTouchingCourt}
         />
         <Text style={styles.hint}>
           {selected
@@ -633,7 +683,7 @@ function StatsScreen({
 }
 
 const ZONE_COLS = 11; // odd, so a zone is centered on the rim
-const ZONE_ROWS = 10;
+const ZONE_ROWS = 20;
 const ZONE_W = COURT_W / ZONE_COLS;
 const ZONE_H = COURT_H / ZONE_ROWS;
 const ZONE_GAP = 0.26; // about 2px between zones on a phone
@@ -663,7 +713,7 @@ function HeatMapScreen({
   rotateCourt: () => void;
 }) {
   const [zone, setZone] = useState<number | null>(null);
-  const [zoomed, setZoomed] = useState(false);
+  const [touchingCourt, setTouchingCourt] = useState(false);
   const zones = useMemo(() => {
     const byZone = new Map<number, Shot[]>();
     for (const s of shots) {
@@ -679,13 +729,13 @@ function HeatMapScreen({
   return (
     <View style={{ flex: 1 }}>
       <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} />
-      <ScrollView scrollEnabled={!zoomed} contentContainerStyle={{ paddingBottom: 16 }}>
+      <ScrollView scrollEnabled={!touchingCourt} contentContainerStyle={{ paddingBottom: 16 }}>
         <CourtFrame
           rotation={rotation}
           background="#ffffff"
           line="#868e96"
           onTap={(x, y) => setZone(zoneAt(x, y))}
-          onZoomedChange={setZoomed}
+          onTouchingChange={setTouchingCourt}
           underLines={Array.from(zones, ([i, z]) => (
             <Rect
               key={i}
