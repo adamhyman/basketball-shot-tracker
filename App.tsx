@@ -45,7 +45,20 @@ type Player = { id: string; name: string };
 // x: 0..50 ft (left to right), y: 0..47 ft (baseline up)
 type Shot = { id: string; playerId: string; x: number; y: number; result: ShotResult; date: number };
 type FreeThrow = { id: string; playerId: string; made: boolean; date: number };
-type Rebound = { id: string; playerId: string; date: number };
+type ReboundKind = 'offensive' | 'defensive';
+// Rebounds saved before the split have no kind.
+type Rebound = { id: string; playerId: string; kind?: ReboundKind; date: number };
+
+const REBOUND_KINDS: { key: ReboundKind; label: string }[] = [
+  { key: 'defensive', label: 'Defensive Rebounds' },
+  { key: 'offensive', label: 'Offensive Rebounds' },
+];
+
+// Left to right in the Add stat popup.
+const POPUP_REBOUNDS: { key: ReboundKind; label: string }[] = [
+  { key: 'defensive', label: 'Defensive Rebound' },
+  { key: 'offensive', label: 'Offensive Rebound' },
+];
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 const STORAGE_KEY = 'shot-tracker-v1';
@@ -415,29 +428,34 @@ function ReboundPanel({
 }: {
   playerId: string;
   rebounds: Rebound[];
-  addRebound: (playerId: string) => void;
-  undoRebound: (playerId: string) => void;
+  addRebound: (playerId: string, kind: ReboundKind) => void;
+  undoRebound: (playerId: string, kind: ReboundKind) => void;
 }) {
-  const count = rebounds.filter((r) => r.playerId === playerId).length;
-
   return (
-    <View style={styles.panel}>
-      <View style={styles.panelHeader}>
-        <Text style={styles.panelTitle}>Rebounds</Text>
-        <Text style={styles.panelScore}>{count}</Text>
-      </View>
-      <View style={{ flexDirection: 'row', marginTop: 10 }}>
-        <Pressable style={[styles.panelBtn, styles.btnBlue]} onPress={() => addRebound(playerId)}>
-          <Text style={styles.panelBtnText}>+ Rebound</Text>
-        </Pressable>
-      </View>
-      <Pressable
-        onPress={() => undoRebound(playerId)}
-        disabled={count === 0}
-        style={[styles.undo, { marginTop: 10, alignSelf: 'flex-end' }, count === 0 && { opacity: 0.4 }]}
-      >
-        <Text style={styles.btnText}>Undo last rebound</Text>
-      </Pressable>
+    <View style={styles.reboundRow}>
+      {REBOUND_KINDS.map(({ key, label }) => {
+        const count = rebounds.filter((r) => r.playerId === playerId && r.kind === key).length;
+        return (
+          <View key={key} style={[styles.panel, styles.reboundPanel]}>
+            <View style={styles.panelHeader}>
+              <Text style={[styles.panelTitle, { flex: 1 }]}>{label}</Text>
+              <Text style={styles.panelScore}>{count}</Text>
+            </View>
+            <View style={{ flexDirection: 'row', marginTop: 10 }}>
+              <Pressable style={[styles.panelBtn, styles.btnBlue]} onPress={() => addRebound(playerId, key)}>
+                <Text style={styles.panelBtnText}>+ Add</Text>
+              </Pressable>
+            </View>
+            <Pressable
+              onPress={() => undoRebound(playerId, key)}
+              disabled={count === 0}
+              style={[styles.undo, { marginTop: 10, alignItems: 'center' }, count === 0 && { opacity: 0.4 }]}
+            >
+              <Text style={styles.btnText}>Undo</Text>
+            </Pressable>
+          </View>
+        );
+      })}
     </View>
   );
 }
@@ -456,8 +474,8 @@ function ShotsScreen(props: {
   undo: (playerId: string | null) => void;
   addFT: (playerId: string, made: boolean) => void;
   undoFT: (playerId: string) => void;
-  addRebound: (playerId: string) => void;
-  undoRebound: (playerId: string) => void;
+  addRebound: (playerId: string, kind: ReboundKind) => void;
+  undoRebound: (playerId: string, kind: ReboundKind) => void;
   rotation: Rotation;
   rotateCourt: () => void;
 }) {
@@ -513,7 +531,7 @@ function ShotsScreen(props: {
       <Modal transparent animationType="fade" visible={pending !== null} onRequestClose={closePending}>
         <View style={styles.backdrop}>
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Shot result</Text>
+            <Text style={styles.cardTitle}>Add stat</Text>
             {selected === null && (
               <View style={styles.shooterPicker}>
                 {players.map((p) => (
@@ -536,6 +554,23 @@ function ShotsScreen(props: {
                 <Text style={[styles.btnText, { color: '#fff' }]}>{r.label}</Text>
               </Pressable>
             ))}
+            {selected === null && (
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                {POPUP_REBOUNDS.map(({ key, label }) => (
+                  <Pressable
+                    key={key}
+                    disabled={!shooter}
+                    style={[styles.btn, styles.btnBlue, styles.popupReboundBtn, !shooter && { opacity: 0.4 }]}
+                    onPress={() => {
+                      if (shooter) addRebound(shooter, key);
+                      closePending();
+                    }}
+                  >
+                    <Text style={[styles.btnText, { color: '#fff', textAlign: 'center' }]}>{label}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
             <Pressable style={[styles.btn, styles.btnGray, { marginTop: 12 }]} onPress={closePending}>
               <Text style={styles.btnText}>Cancel</Text>
             </Pressable>
@@ -574,6 +609,8 @@ function StatsScreen({
       {players.map((p) => {
         const s = shots.filter((x) => x.playerId === p.id);
         const ft = freeThrows.filter((x) => x.playerId === p.id);
+        const r = rebounds.filter((x) => x.playerId === p.id);
+        const untyped = r.filter((x) => !x.kind).length;
         return (
           <View key={p.id} style={styles.statCard}>
             <Text style={styles.statName}>{p.name}</Text>
@@ -581,7 +618,12 @@ function StatsScreen({
             <Text style={styles.statLine}>FG {shootingLine(s)}</Text>
             <Text style={styles.statLine}>3PT {shootingLine(s.filter(isThree))}</Text>
             <Text style={styles.statLine}>FT {ft.filter((x) => x.made).length}/{ft.length}</Text>
-            <Text style={styles.statLine}>Rebounds {rebounds.filter((x) => x.playerId === p.id).length}</Text>
+            {REBOUND_KINDS.map(({ key, label }) => (
+              <Text key={key} style={styles.statLine}>
+                {label} {r.filter((x) => x.kind === key).length}
+              </Text>
+            ))}
+            {untyped > 0 && <Text style={styles.statSmall}>Rebounds with no type: {untyped}</Text>}
             <Text style={styles.statSmall}>Fouled on {s.filter((x) => hasFoul(x.result)).length} shots</Text>
           </View>
         );
@@ -850,10 +892,11 @@ export default function App() {
       const i = prev.map((f) => f.playerId).lastIndexOf(playerId);
       return i < 0 ? prev : prev.filter((_, idx) => idx !== i);
     });
-  const addRebound = (playerId: string) => setRebounds((prev) => [...prev, { id: uid(), playerId, date: Date.now() }]);
-  const undoRebound = (playerId: string) =>
+  const addRebound = (playerId: string, kind: ReboundKind) =>
+    setRebounds((prev) => [...prev, { id: uid(), playerId, kind, date: Date.now() }]);
+  const undoRebound = (playerId: string, kind: ReboundKind) =>
     setRebounds((prev) => {
-      const i = prev.map((r) => r.playerId).lastIndexOf(playerId);
+      const i = prev.map((r) => r.playerId === playerId && r.kind === kind).lastIndexOf(true);
       return i < 0 ? prev : prev.filter((_, idx) => idx !== i);
     });
   const rotateCourt = () => setRotation((prev) => ((prev + 90) % 360) as Rotation);
@@ -955,6 +998,9 @@ const styles = StyleSheet.create({
   btnGreen: { backgroundColor: '#2f9e44' },
   btnRed: { backgroundColor: '#e03131' },
   panel: { marginTop: 16, marginHorizontal: 12, padding: 14, backgroundColor: '#fff', borderRadius: 12 },
+  popupReboundBtn: { flex: 1, justifyContent: 'center', paddingHorizontal: 8 },
+  reboundRow: { flexDirection: 'row', gap: 12, marginTop: 16, marginHorizontal: 12 },
+  reboundPanel: { flex: 1, marginTop: 0, marginHorizontal: 0 },
   panelHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   panelTitle: { fontSize: 18, fontWeight: '700' },
   panelScore: { fontSize: 24, fontWeight: '800' },
