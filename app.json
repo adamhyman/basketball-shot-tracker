@@ -4,7 +4,7 @@
     "slug": "basketball-shot-tracker",
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "plugins": [
       "expo-status-bar"
     ]

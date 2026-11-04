@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   StyleSheet,
   Share,
   Alert,
+  useColorScheme,
   useWindowDimensions,
 } from 'react-native';
 import Svg, { G, Rect, Circle, Line, Path } from 'react-native-svg';
@@ -71,6 +72,32 @@ const migrateShot = (s: Omit<Shot, 'result'> & { result: string }): Shot => ({
 });
 
 // ---------- Court ----------
+
+type CourtTexture = 'solid' | 'hardwood' | 'parquet';
+
+type CourtColors = {
+  court: string;
+  secondary: string; // the texture's alternating tone
+  texture: CourtTexture;
+  line: string;
+  make: string;
+  makeBorder: string;
+  miss: string;
+  foul: string;
+  hoop: string;
+};
+
+const DEFAULT_COLORS: CourtColors = {
+  court: '#ecc99e',
+  secondary: '#dcb382',
+  texture: 'solid',
+  line: '#ffffff',
+  make: '#2f9e44',
+  makeBorder: '#ffffff',
+  miss: '#e03131',
+  foul: '#fab005',
+  hoop: '#e8590c',
+};
 
 const COURT_W = 50;
 const COURT_H = 94;
@@ -142,7 +169,7 @@ const clampView = (
 };
 
 // One half's markings, drawn for the near baseline.
-function HalfCourtLines({ line, sw }: { line: string; sw: number }) {
+function HalfCourtLines({ line, hoop, sw }: { line: string; hoop: string; sw: number }) {
   return (
     <>
       {/* paint */}
@@ -151,7 +178,7 @@ function HalfCourtLines({ line, sw }: { line: string; sw: number }) {
       <Circle cx={25} cy={fy(19)} r={6} fill="none" stroke={line} strokeWidth={sw} />
       {/* backboard + rim */}
       <Line x1={22} y1={fy(4)} x2={28} y2={fy(4)} stroke={line} strokeWidth={sw * 1.5} />
-      <Circle cx={25} cy={fy(RIM_Y)} r={0.75} fill="none" stroke="#e8590c" strokeWidth={sw} />
+      <Circle cx={25} cy={fy(RIM_Y)} r={0.75} fill="none" stroke={hoop} strokeWidth={sw} />
       {/* restricted area */}
       <Path d={`M 29 ${fy(RIM_Y)} A 4 4 0 0 0 21 ${fy(RIM_Y)}`} fill="none" stroke={line} strokeWidth={sw} />
       {/* three-point line: 3 ft from sideline, 23.75 ft arc from the rim */}
@@ -169,6 +196,7 @@ function CourtFrame({
   rotation,
   background,
   line,
+  hoop,
   onTap,
   onTouchingChange,
   underLines,
@@ -177,11 +205,13 @@ function CourtFrame({
   rotation: Rotation;
   background: string;
   line: string;
+  hoop: string;
   onTap: (x: number, y: number) => void;
   onTouchingChange: (touching: boolean) => void;
   underLines?: React.ReactNode;
   children?: (zoom: number) => React.ReactNode;
 }) {
+  const { styles } = useTheme();
   const { width } = useWindowDimensions();
   const sideways = rotation % 180 !== 0;
   // The whole court, and the part of it visible at zoom 1 (half).
@@ -286,9 +316,9 @@ function CourtFrame({
                 {/* half court line + center circle */}
                 <Line x1={0} y1={HALF_COURT} x2={COURT_W} y2={HALF_COURT} stroke={line} strokeWidth={sw} />
                 <Circle cx={25} cy={HALF_COURT} r={6} fill="none" stroke={line} strokeWidth={sw} />
-                <HalfCourtLines line={line} sw={sw} />
+                <HalfCourtLines line={line} hoop={hoop} sw={sw} />
                 <G transform={`translate(${COURT_W},${COURT_H}) rotate(180)`}>
-                  <HalfCourtLines line={line} sw={sw} />
+                  <HalfCourtLines line={line} hoop={hoop} sw={sw} />
                 </G>
                 {children?.(view.zoom)}
               </G>
@@ -321,41 +351,85 @@ function CourtFrame({
   );
 }
 
+const rectPath = (x: number, y: number, w: number, h: number) => `M${x} ${y}h${w}v${h}h${-w}z`;
+
+// Each texture is the secondary-colored parts of the floor, as one path so it stays cheap to redraw.
+const hardwoodPath = (boardW: number, plankL: number, seam: number) => {
+  let d = '';
+  for (let board = 0; board * boardW < COURT_W; board++) {
+    const x = board * boardW;
+    const w = Math.min(boardW, COURT_W - x);
+    const secondary = board % 2 === 0; // boards alternate tone; the rest stays the court color
+    for (let start = (board * 5) % plankL - plankL; start < COURT_H; start += plankL) {
+      // Secondary boards leave a gap at each plank end; the others get a thin seam there.
+      const top = Math.max(secondary ? start + seam : start, 0);
+      const bottom = Math.min(secondary ? start + plankL : start + seam, COURT_H);
+      if (bottom > top) d += rectPath(x, top, w, bottom - top);
+    }
+  }
+  return d;
+};
+
+const parquetPath = (size: number) => {
+  let d = '';
+  for (let col = 0; col * size < COURT_W; col++) {
+    for (let row = 0; row * size < COURT_H; row++) {
+      if ((col + row) % 2 === 0) d += rectPath(col * size, row * size, size, Math.min(size, COURT_H - row * size));
+    }
+  }
+  return d;
+};
+
+const TEXTURE_PATHS: Record<Exclude<CourtTexture, 'solid'>, string> = {
+  hardwood: hardwoodPath(1.5, 14, 0.2),
+  parquet: parquetPath(5),
+};
+
+function CourtTextureLayer({ colors }: { colors: CourtColors }) {
+  return colors.texture === 'solid' ? null : <Path d={TEXTURE_PATHS[colors.texture]} fill={colors.secondary} />;
+}
+
+// m scales the marker, e.g. to keep it the same size on screen while zoomed.
+function ShotMarker({ cx, cy, result, m, colors }: { cx: number; cy: number; result: ShotResult; m: number; colors: CourtColors }) {
+  return (
+    <>
+      {isMade(result) ? (
+        <Circle cx={cx} cy={cy} r={m} fill={colors.make} stroke={colors.makeBorder} strokeWidth={0.15 * m} />
+      ) : (
+        <>
+          <Line x1={cx - 0.9 * m} y1={cy - 0.9 * m} x2={cx + 0.9 * m} y2={cy + 0.9 * m} stroke={colors.miss} strokeWidth={0.45 * m} strokeLinecap="round" />
+          <Line x1={cx - 0.9 * m} y1={cy + 0.9 * m} x2={cx + 0.9 * m} y2={cy - 0.9 * m} stroke={colors.miss} strokeWidth={0.45 * m} strokeLinecap="round" />
+        </>
+      )}
+      {hasFoul(result) && <Circle cx={cx} cy={cy} r={1.7 * m} fill="none" stroke={colors.foul} strokeWidth={0.3 * m} />}
+    </>
+  );
+}
+
 function Court({
   shots,
   rotation,
+  colors,
   onTapCourt,
   onTouchingChange,
 }: {
   shots: Shot[];
   rotation: Rotation;
+  colors: CourtColors;
   onTapCourt: (x: number, y: number) => void;
   onTouchingChange: (touching: boolean) => void;
 }) {
   return (
-    <CourtFrame rotation={rotation} background="#ecc99e" line="#ffffff" onTap={onTapCourt} onTouchingChange={onTouchingChange}>
-      {(zoom) => {
-        const m = 1 / zoom; // keeps markers the same size on screen while zoomed
-        return shots.map((s) => {
-          const cx = s.x;
-          const cy = fy(s.y);
-          return (
-            <React.Fragment key={s.id}>
-              {isMade(s.result) ? (
-                <Circle cx={cx} cy={cy} r={m} fill="#2f9e44" stroke="#ffffff" strokeWidth={0.15 * m} />
-              ) : (
-                <>
-                  <Line x1={cx - 0.9 * m} y1={cy - 0.9 * m} x2={cx + 0.9 * m} y2={cy + 0.9 * m} stroke="#e03131" strokeWidth={0.45 * m} strokeLinecap="round" />
-                  <Line x1={cx - 0.9 * m} y1={cy + 0.9 * m} x2={cx + 0.9 * m} y2={cy - 0.9 * m} stroke="#e03131" strokeWidth={0.45 * m} strokeLinecap="round" />
-                </>
-              )}
-              {hasFoul(s.result) && (
-                <Circle cx={cx} cy={cy} r={1.7 * m} fill="none" stroke="#fab005" strokeWidth={0.3 * m} />
-              )}
-            </React.Fragment>
-          );
-        });
-      }}
+    <CourtFrame
+      rotation={rotation}
+      background={colors.court}
+      line={colors.line}
+      hoop={colors.hoop}
+      onTap={onTapCourt}
+      onTouchingChange={onTouchingChange}
+      underLines={<CourtTextureLayer colors={colors} />}
+    >
+      {(zoom) => shots.map((s) => <ShotMarker key={s.id} cx={s.x} cy={fy(s.y)} result={s.result} m={1 / zoom} colors={colors} />)}
     </CourtFrame>
   );
 }
@@ -373,6 +447,7 @@ function PlayerPicker({
   onSelect: (id: string | null) => void;
   onAdd: (name: string) => void;
 }) {
+  const { styles, t } = useTheme();
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState('');
 
@@ -407,6 +482,7 @@ function PlayerPicker({
               value={name}
               onChangeText={setName}
               placeholder="Name"
+              placeholderTextColor={t.muted}
               autoFocus
               style={styles.input}
               onSubmitEditing={submit}
@@ -440,6 +516,7 @@ function FreeThrowPanel({
   addFT: (playerId: string, made: boolean) => void;
   undoFT: (playerId: string) => void;
 }) {
+  const { styles } = useTheme();
   const mine = freeThrows.filter((f) => f.playerId === playerId);
 
   return (
@@ -482,6 +559,7 @@ function ReboundPanel({
   addRebound: (playerId: string, kind: ReboundKind) => void;
   undoRebound: (playerId: string, kind: ReboundKind) => void;
 }) {
+  const { styles } = useTheme();
   return (
     <View style={styles.reboundRow}>
       {REBOUND_KINDS.map(({ key, label }) => {
@@ -529,8 +607,10 @@ function ShotsScreen(props: {
   undoRebound: (playerId: string, kind: ReboundKind) => void;
   rotation: Rotation;
   rotateCourt: () => void;
+  colors: CourtColors;
 }) {
-  const { players, shots, freeThrows, rebounds, selected, setSelected, addPlayer, addShot, undo, addFT, undoFT, addRebound, undoRebound, rotation, rotateCourt } = props;
+  const { styles } = useTheme();
+  const { players, shots, freeThrows, rebounds, selected, setSelected, addPlayer, addShot, undo, addFT, undoFT, addRebound, undoRebound, rotation, rotateCourt, colors } = props;
   const [pending, setPending] = useState<{ x: number; y: number } | null>(null);
   const [pendingPlayer, setPendingPlayer] = useState<string | null>(null);
   const [touchingCourt, setTouchingCourt] = useState(false);
@@ -549,6 +629,7 @@ function ShotsScreen(props: {
         <Court
           shots={visible}
           rotation={rotation}
+          colors={colors}
           onTapCourt={(x, y) => {
             if (players.length > 0) setPending({ x, y });
           }}
@@ -653,6 +734,7 @@ function StatsScreen({
   freeThrows: FreeThrow[];
   rebounds: Rebound[];
 }) {
+  const { styles } = useTheme();
   if (players.length === 0) return <Text style={styles.hint}>No players yet.</Text>;
   return (
     <ScrollView contentContainerStyle={{ padding: 12, gap: 10 }}>
@@ -687,13 +769,41 @@ const ZONE_ROWS = 20;
 const ZONE_W = COURT_W / ZONE_COLS;
 const ZONE_H = COURT_H / ZONE_ROWS;
 const ZONE_GAP = 0.26; // about 2px between zones on a phone
-const HEAT_RAMP = ['#cde2fb', '#9ec5f4', '#5598e7', '#256abf', '#0d366b']; // fewer to more shots
+const HEAT_RAMP = ['#ffe066', '#ffb22e', '#fd7e14', '#e8431f', '#b3140f']; // yellow to orange to red
 
 const zoneAt = (x: number, y: number) =>
   Math.min(Math.floor(x / ZONE_W), ZONE_COLS - 1) + Math.min(Math.floor(y / ZONE_H), ZONE_ROWS - 1) * ZONE_COLS;
 const zoneCol = (zone: number) => zone % ZONE_COLS;
 const zoneRow = (zone: number) => Math.floor(zone / ZONE_COLS);
 const heatColor = (count: number, max: number) => HEAT_RAMP[Math.ceil((count / max) * HEAT_RAMP.length) - 1];
+
+type HeatMode = 'attempts' | 'made' | 'fg';
+
+const MIN_FG_ATTEMPTS = 3; // fewer than this is too few shots to color by FG%
+const LOW_SAMPLE_COLOR = '#dee2e6';
+
+const HEAT_MODES: { key: HeatMode; label: string; hint: string }[] = [
+  { key: 'attempts', label: 'Attempts', hint: 'Redder zones have more shot attempts. Tap one to see its shooting.' },
+  { key: 'made', label: 'Made Shots', hint: 'Redder zones have more made shots. Tap one to see its shooting.' },
+  {
+    key: 'fg',
+    label: 'FG%',
+    hint: 'Redder zones have a higher FG%, which gets more reliable with more shots. Tap one to see its shooting.',
+  },
+];
+
+const zoneCount = (z: Shot[], mode: HeatMode) => (mode === 'made' ? z.filter((s) => isMade(s.result)).length : z.length);
+
+// FG% uses a fixed 0-100% scale; the counts are relative to the busiest zone (max). Null leaves the zone blank.
+const zoneFill = (z: Shot[], mode: HeatMode, max: number) => {
+  if (mode === 'fg') {
+    if (z.length < MIN_FG_ATTEMPTS) return LOW_SAMPLE_COLOR;
+    const pct = zoneCount(z, 'made') / z.length;
+    return HEAT_RAMP[Math.min(Math.floor(pct * HEAT_RAMP.length), HEAT_RAMP.length - 1)];
+  }
+  const count = zoneCount(z, mode);
+  return count > 0 ? heatColor(count, max) : null;
+};
 
 function HeatMapScreen({
   players,
@@ -712,6 +822,8 @@ function HeatMapScreen({
   rotation: Rotation;
   rotateCourt: () => void;
 }) {
+  const { styles, t } = useTheme();
+  const [mode, setMode] = useState<HeatMode>('attempts');
   const [zone, setZone] = useState<number | null>(null);
   const [touchingCourt, setTouchingCourt] = useState(false);
   const zones = useMemo(() => {
@@ -723,30 +835,49 @@ function HeatMapScreen({
     }
     return byZone;
   }, [shots, selected]);
-  const max = Math.max(0, ...Array.from(zones.values(), (z) => z.length));
+  const max = Math.max(0, ...Array.from(zones.values(), (z) => zoneCount(z, mode)));
   const zoneShots = zone === null ? undefined : zones.get(zone);
 
   return (
     <View style={{ flex: 1 }}>
       <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} />
+      <View style={styles.modeRow}>
+        {HEAT_MODES.map(({ key, label }) => (
+          <Pressable
+            key={key}
+            onPress={() => setMode(key)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: mode === key }}
+            style={[styles.chip, mode === key && styles.chipOn]}
+          >
+            <Text style={[styles.chipText, mode === key && styles.chipTextOn]}>{label}</Text>
+          </Pressable>
+        ))}
+      </View>
       <ScrollView scrollEnabled={!touchingCourt} contentContainerStyle={{ paddingBottom: 16 }}>
         <CourtFrame
           rotation={rotation}
-          background="#ffffff"
-          line="#868e96"
+          background={t.heatCourt}
+          line={t.heatLine}
+          hoop={t.heatHoop}
           onTap={(x, y) => setZone(zoneAt(x, y))}
           onTouchingChange={setTouchingCourt}
-          underLines={Array.from(zones, ([i, z]) => (
-            <Rect
-              key={i}
-              x={zoneCol(i) * ZONE_W + ZONE_GAP / 2}
-              y={fy((zoneRow(i) + 1) * ZONE_H) + ZONE_GAP / 2}
-              width={ZONE_W - ZONE_GAP}
-              height={ZONE_H - ZONE_GAP}
-              rx={0.3}
-              fill={heatColor(z.length, max)}
-            />
-          ))}
+          underLines={Array.from(zones, ([i, z]) => {
+            const fill = zoneFill(z, mode, max);
+            return (
+              fill && (
+                <Rect
+                  key={i}
+                  x={zoneCol(i) * ZONE_W + ZONE_GAP / 2}
+                  y={fy((zoneRow(i) + 1) * ZONE_H) + ZONE_GAP / 2}
+                  width={ZONE_W - ZONE_GAP}
+                  height={ZONE_H - ZONE_GAP}
+                  rx={0.3}
+                  fill={fill}
+                />
+              )
+            );
+          })}
         >
           {(courtZoom) =>
             zone !== null &&
@@ -758,27 +889,43 @@ function HeatMapScreen({
                 height={ZONE_H}
                 rx={0.3}
                 fill="none"
-                stroke="#212529"
+                stroke={t.text}
                 strokeWidth={0.4 / courtZoom}
               />
             )
           }
         </CourtFrame>
-        {max > 1 && (
-          <View style={styles.heatLegend}>
-            <Text style={styles.legendText}>Fewest: 1</Text>
-            {HEAT_RAMP.map((color) => (
-              <View key={color} style={[styles.heatSwatch, { backgroundColor: color }]} />
-            ))}
-            <Text style={styles.legendText}>Most: {max}</Text>
-          </View>
-        )}
+        {mode === 'fg'
+          ? zones.size > 0 && (
+              <>
+                <View style={styles.heatLegend}>
+                  <Text style={styles.legendText}>0% </Text>
+                  {HEAT_RAMP.map((color) => (
+                    <View key={color} style={[styles.heatSwatch, { backgroundColor: color }]} />
+                  ))}
+                  <Text style={styles.legendText}> 100%</Text>
+                </View>
+                <View style={[styles.heatLegend, { marginTop: 6 }]}>
+                  <View style={[styles.heatSwatch, { backgroundColor: LOW_SAMPLE_COLOR }]} />
+                  <Text style={styles.legendText}> Under {MIN_FG_ATTEMPTS} attempts</Text>
+                </View>
+              </>
+            )
+          : max > 1 && (
+              <View style={styles.heatLegend}>
+                <Text style={styles.legendText}>Fewest: 1 </Text>
+                {HEAT_RAMP.map((color) => (
+                  <View key={color} style={[styles.heatSwatch, { backgroundColor: color }]} />
+                ))}
+                <Text style={styles.legendText}> Most: {max}</Text>
+              </View>
+            )}
         <Text style={styles.hint}>
-          {max === 0
+          {zones.size === 0
             ? 'No shots to show yet.'
             : zoneShots
             ? `This zone: ${shootingLine(zoneShots)}`
-            : 'Darker zones have more shot attempts. Tap one to see its shooting.'}
+            : HEAT_MODES.find(({ key }) => key === mode)?.hint}
         </Text>
         <Pressable onPress={rotateCourt} style={[styles.undo, { marginTop: 16, alignSelf: 'center' }]}>
           <Text style={styles.btnText}>Rotate court</Text>
@@ -788,17 +935,103 @@ function HeatMapScreen({
   );
 }
 
-function AdminScreen({
+const COLOR_SWATCHES: { name: string; hex: string }[] = [
+  { name: 'Wood', hex: '#ecc99e' },
+  { name: 'Medium wood', hex: '#dcb382' },
+  { name: 'Dark wood', hex: '#b5835a' },
+  { name: 'White', hex: '#ffffff' },
+  { name: 'Light gray', hex: '#dee2e6' },
+  { name: 'Gray', hex: '#868e96' },
+  { name: 'Black', hex: '#212529' },
+  { name: 'Green', hex: '#2f9e44' },
+  { name: 'Teal', hex: '#0ca678' },
+  { name: 'Blue', hex: '#1971c2' },
+  { name: 'Navy', hex: '#1c3f6e' },
+  { name: 'Purple', hex: '#7048e8' },
+  { name: 'Red', hex: '#e03131' },
+  { name: 'Orange', hex: '#e8590c' },
+  { name: 'Yellow', hex: '#fab005' },
+];
+
+const COURT_TEXTURES: { key: CourtTexture; label: string }[] = [
+  { key: 'solid', label: 'Solid' },
+  { key: 'hardwood', label: 'Hardwood' },
+  { key: 'parquet', label: 'Parquet' },
+];
+
+const COLOR_SETTINGS: { key: Exclude<keyof CourtColors, 'texture'>; label: string }[] = [
+  { key: 'court', label: 'Court Color' },
+  { key: 'secondary', label: 'Secondary Color' },
+  { key: 'line', label: 'Line Color' },
+  { key: 'make', label: 'Makes' },
+  { key: 'makeBorder', label: 'Makes Border' },
+  { key: 'miss', label: 'Misses' },
+  { key: 'foul', label: 'Fouls' },
+  { key: 'hoop', label: 'Hoop Color' },
+];
+
+function ColorPreview({ colors }: { colors: CourtColors }) {
+  return (
+    <View style={{ borderRadius: 8, overflow: 'hidden', marginTop: 12 }}>
+      <Svg width="100%" height={72} viewBox="0 0 50 12" preserveAspectRatio="xMidYMid slice">
+        <Rect x={0} y={0} width={50} height={12} fill={colors.court} />
+        <CourtTextureLayer colors={colors} />
+        <Line x1={0} y1={10.5} x2={50} y2={10.5} stroke={colors.line} strokeWidth={0.3} />
+        <Circle cx={7} cy={5.5} r={1.2} fill="none" stroke={colors.hoop} strokeWidth={0.4} />
+        <ShotMarker cx={15} cy={5.5} result="made" m={1} colors={colors} />
+        <ShotMarker cx={23} cy={5.5} result="madeFoul" m={1} colors={colors} />
+        <ShotMarker cx={31} cy={5.5} result="missed" m={1} colors={colors} />
+        <ShotMarker cx={39} cy={5.5} result="missedFoul" m={1} colors={colors} />
+      </Svg>
+    </View>
+  );
+}
+
+type ThemeMode = 'light' | 'dark' | 'phone';
+
+const THEME_MODES: { key: ThemeMode; label: string }[] = [
+  { key: 'light', label: 'Off' },
+  { key: 'dark', label: 'On' },
+  { key: 'phone', label: 'Match device' },
+];
+
+type SettingsSection = 'display' | 'export';
+
+const SETTINGS_SECTIONS: { key: SettingsSection; label: string }[] = [
+  { key: 'display', label: 'Display' },
+  { key: 'export', label: 'Export' },
+];
+
+function SettingsScreen({
   players,
   shots,
   freeThrows,
   rebounds,
+  colors,
+  setColors,
+  themeMode,
+  setThemeMode,
 }: {
   players: Player[];
   shots: Shot[];
   freeThrows: FreeThrow[];
   rebounds: Rebound[];
+  colors: CourtColors;
+  setColors: (colors: CourtColors) => void;
+  themeMode: ThemeMode;
+  setThemeMode: (themeMode: ThemeMode) => void;
 }) {
+  const { styles } = useTheme();
+  const [section, setSection] = useState<SettingsSection>('display');
+  const hasTexture = colors.texture !== 'solid';
+  const shownColorSettings = COLOR_SETTINGS.filter(({ key }) => key !== 'secondary' || hasTexture);
+  // A make is still visible if only its border blends in, so that doesn't need a warning.
+  const hidden = shownColorSettings.filter(
+    ({ key }) => key !== 'court' && key !== 'makeBorder' && colors[key] === colors.court,
+  );
+  const isDefault =
+    colors.texture === DEFAULT_COLORS.texture && COLOR_SETTINGS.every(({ key }) => colors[key] === DEFAULT_COLORS[key]);
+
   const exportData = async () => {
     try {
       await Share.share({ message: JSON.stringify({ players, shots, freeThrows, rebounds }, null, 2) });
@@ -808,29 +1041,120 @@ function AdminScreen({
   };
 
   return (
-    <View style={{ padding: 12 }}>
-      <View style={styles.statCard}>
-        <Text style={styles.statName}>Export data</Text>
-        <Text style={styles.statSmall}>
-          Shares all players, shots, free throws and rebounds as JSON text. Save it somewhere safe to keep a copy.
-        </Text>
-        <Pressable style={[styles.btn, styles.btnBlue, { marginTop: 12 }]} onPress={exportData}>
-          <Text style={[styles.btnText, { color: '#fff' }]}>Export data</Text>
-        </Pressable>
+    <View style={{ flex: 1 }}>
+      <View style={[styles.modeRow, { paddingTop: 8 }]}>
+        {SETTINGS_SECTIONS.map(({ key, label }) => (
+          <Pressable
+            key={key}
+            onPress={() => setSection(key)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: section === key }}
+            style={[styles.chip, section === key && styles.chipOn]}
+          >
+            <Text style={[styles.chipText, section === key && styles.chipTextOn]}>{label}</Text>
+          </Pressable>
+        ))}
       </View>
+      <ScrollView contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 12 }}>
+        {section === 'display' && (
+          <View style={[styles.statCard, { marginBottom: 12 }]}>
+            <Text style={styles.statName}>Dark Mode</Text>
+            <View style={styles.swatchRow}>
+              {THEME_MODES.map(({ key, label }) => (
+                <Pressable
+                  key={key}
+                  onPress={() => setThemeMode(key)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Dark Mode: ${label}`}
+                  accessibilityState={{ selected: themeMode === key }}
+                  style={[styles.chip, themeMode === key && styles.chipOn]}
+                >
+                  <Text style={[styles.chipText, themeMode === key && styles.chipTextOn]}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        )}
+        {section === 'display' && (
+          <View style={styles.statCard}>
+            <Text style={styles.statName}>Colors</Text>
+            <ColorPreview colors={colors} />
+            {hidden.length > 0 && (
+              <Text style={[styles.warning, { marginTop: 8, borderRadius: 8, overflow: 'hidden' }]}>
+                Same as the Court Color, so hard to see: {hidden.map(({ label }) => label).join(', ')}
+              </Text>
+            )}
+            {shownColorSettings.map(({ key, label }) => (
+              <View key={key} style={{ marginTop: 14 }}>
+                <Text style={styles.statLine}>{label}</Text>
+                <View style={styles.swatchRow}>
+                  {COLOR_SWATCHES.map(({ name, hex }) => (
+                    <Pressable
+                      key={hex}
+                      onPress={() => setColors({ ...colors, [key]: hex })}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${label}: ${name}`}
+                      accessibilityState={{ selected: colors[key] === hex }}
+                      style={[styles.swatchRing, colors[key] === hex && styles.swatchRingOn]}
+                    >
+                      <View style={[styles.swatch, { backgroundColor: hex }]} />
+                    </Pressable>
+                  ))}
+                </View>
+                {key === 'court' && (
+                  <>
+                    <Text style={[styles.statLine, { marginTop: 14 }]}>Court Texture</Text>
+                    <View style={styles.swatchRow}>
+                      {COURT_TEXTURES.map((t) => (
+                        <Pressable
+                          key={t.key}
+                          onPress={() => setColors({ ...colors, texture: t.key })}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected: colors.texture === t.key }}
+                          style={[styles.chip, colors.texture === t.key && styles.chipOn]}
+                        >
+                          <Text style={[styles.chipText, colors.texture === t.key && styles.chipTextOn]}>{t.label}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </>
+                )}
+              </View>
+            ))}
+            <Pressable
+              onPress={() => setColors(DEFAULT_COLORS)}
+              disabled={isDefault}
+              style={[styles.undo, { marginTop: 16, alignItems: 'center' }, isDefault && { opacity: 0.4 }]}
+            >
+              <Text style={styles.btnText}>Reset colors</Text>
+            </Pressable>
+          </View>
+        )}
+        {section === 'export' && (
+          <View style={styles.statCard}>
+            <Text style={styles.statName}>Export data</Text>
+            <Text style={styles.statSmall}>
+              Shares all players, shots, free throws and rebounds as JSON text. Save it somewhere safe to keep a copy.
+            </Text>
+            <Pressable style={[styles.btn, styles.btnBlue, { marginTop: 12 }]} onPress={exportData}>
+              <Text style={[styles.btnText, { color: '#fff' }]}>Export data</Text>
+            </Pressable>
+          </View>
+        )}
+      </ScrollView>
     </View>
   );
 }
 
 // ---------- App ----------
 
-type Tab = 'shots' | 'stats' | 'heat' | 'admin';
+type Tab = 'shots' | 'stats' | 'heat' | 'settings';
 
 const TABS: [Tab, string][] = [
-  ['shots', 'Shots'],
+  ['shots', 'Shot Chart'],
   ['stats', 'Stats'],
   ['heat', 'Heat Map'],
-  ['admin', 'Admin'],
+  ['settings', 'Settings'],
 ];
 
 const HEAT_ICON_OPACITY = [0.4, 0.6, 1, 0.4, 1, 0.8, 0.6, 0.8, 0.4];
@@ -868,7 +1192,7 @@ function TabIcon({ tab, color }: { tab: Tab; color: string }) {
             opacity={opacity}
           />
         ))}
-      {tab === 'admin' && (
+      {tab === 'settings' && (
         <>
           <Line x1={4} y1={7} x2={20} y2={7} {...stroke} />
           <Circle cx={15} cy={7} r={2.8} fill={color} />
@@ -886,6 +1210,12 @@ export default function App() {
   const [freeThrows, setFreeThrows] = useState<FreeThrow[]>([]);
   const [rebounds, setRebounds] = useState<Rebound[]>([]);
   const [rotation, setRotation] = useState<Rotation>(0);
+  const [colors, setColors] = useState<CourtColors>(DEFAULT_COLORS);
+  const [themeMode, setThemeMode] = useState<ThemeMode>('light');
+  const phoneScheme = useColorScheme();
+  const darkMode = themeMode === 'dark' || (themeMode === 'phone' && phoneScheme === 'dark');
+  const theme = darkMode ? DARK_THEME : LIGHT_THEME;
+  const { t, styles } = theme;
   const [selected, setSelected] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('shots');
   const [loaded, setLoaded] = useState(false);
@@ -910,6 +1240,9 @@ export default function App() {
           setFreeThrows(d.freeThrows ?? []);
           setRebounds(d.rebounds ?? []);
           setRotation(d.rotation ?? 0);
+          setColors({ ...DEFAULT_COLORS, ...d.colors });
+          // Saves from before Match device stored a plain on/off.
+          setThemeMode(d.themeMode ?? (d.darkMode ? 'dark' : 'light'));
         } catch {
           // Unreadable data: keep a copy before normal saves replace it.
           await AsyncStorage.setItem(CORRUPT_BACKUP_KEY, raw).catch(() => setSavingBlocked(true));
@@ -921,8 +1254,8 @@ export default function App() {
 
   useEffect(() => {
     if (!loaded || savingBlocked) return;
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ players, shots, freeThrows, rebounds, rotation })).catch(() => {});
-  }, [players, shots, freeThrows, rebounds, rotation, loaded, savingBlocked]);
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ players, shots, freeThrows, rebounds, rotation, colors, themeMode })).catch(() => {});
+  }, [players, shots, freeThrows, rebounds, rotation, colors, themeMode, loaded, savingBlocked]);
 
   const addPlayer = (name: string) => {
     const p = { id: uid(), name };
@@ -954,113 +1287,177 @@ export default function App() {
   if (!loaded) return null;
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
-      <SafeAreaProvider>
-        <SafeAreaView style={styles.root}>
-          <StatusBar style="dark" />
-          <Text style={styles.title}>{TABS.find(([key]) => key === tab)?.[1]}</Text>
-          {savingBlocked && (
-            <Text style={styles.warning}>Couldn't access saved data. Changes won't be saved. Restart the app to try again.</Text>
-          )}
-          <View style={{ flex: 1 }}>
-            {tab === 'shots' && (
-              <ShotsScreen
-                players={players}
-                shots={shots}
-                freeThrows={freeThrows}
-                rebounds={rebounds}
-                selected={selected}
-                setSelected={setSelected}
-                addPlayer={addPlayer}
-                addShot={addShot}
-                undo={undoShot}
-                addFT={addFT}
-                undoFT={undoFT}
-                addRebound={addRebound}
-                undoRebound={undoRebound}
-                rotation={rotation}
-                rotateCourt={rotateCourt}
-              />
+    <ThemeContext.Provider value={theme}>
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <SafeAreaProvider>
+          <SafeAreaView style={styles.root}>
+            <StatusBar style={darkMode ? 'light' : 'dark'} />
+            <Text style={styles.title}>{TABS.find(([key]) => key === tab)?.[1]}</Text>
+            {savingBlocked && (
+              <Text style={styles.warning}>Couldn't access saved data. Changes won't be saved. Restart the app to try again.</Text>
             )}
-            {tab === 'stats' && <StatsScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
-            {tab === 'heat' && (
-              <HeatMapScreen
-                players={players}
-                shots={shots}
-                selected={selected}
-                setSelected={setSelected}
-                addPlayer={addPlayer}
-                rotation={rotation}
-                rotateCourt={rotateCourt}
-              />
-            )}
-            {tab === 'admin' && <AdminScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
-          </View>
-          <View style={styles.tabBar}>
-            {TABS.map(([key, label]) => (
-              <Pressable
-                key={key}
-                style={[styles.tab, tab === key && styles.tabOn]}
-                onPress={() => setTab(key)}
-                accessibilityRole="tab"
-                accessibilityLabel={label}
-                accessibilityState={{ selected: tab === key }}
-              >
-                <TabIcon tab={key} color={tab === key ? '#1971c2' : '#868e96'} />
-              </Pressable>
-            ))}
-          </View>
-        </SafeAreaView>
-      </SafeAreaProvider>
-    </GestureHandlerRootView>
+            <View style={{ flex: 1 }}>
+              {tab === 'shots' && (
+                <ShotsScreen
+                  players={players}
+                  shots={shots}
+                  freeThrows={freeThrows}
+                  rebounds={rebounds}
+                  selected={selected}
+                  setSelected={setSelected}
+                  addPlayer={addPlayer}
+                  addShot={addShot}
+                  undo={undoShot}
+                  addFT={addFT}
+                  undoFT={undoFT}
+                  addRebound={addRebound}
+                  undoRebound={undoRebound}
+                  rotation={rotation}
+                  rotateCourt={rotateCourt}
+                  colors={colors}
+                />
+              )}
+              {tab === 'stats' && <StatsScreen players={players} shots={shots} freeThrows={freeThrows} rebounds={rebounds} />}
+              {tab === 'heat' && (
+                <HeatMapScreen
+                  players={players}
+                  shots={shots}
+                  selected={selected}
+                  setSelected={setSelected}
+                  addPlayer={addPlayer}
+                  rotation={rotation}
+                  rotateCourt={rotateCourt}
+                />
+              )}
+              {tab === 'settings' && (
+                <SettingsScreen
+                  players={players}
+                  shots={shots}
+                  freeThrows={freeThrows}
+                  rebounds={rebounds}
+                  colors={colors}
+                  setColors={setColors}
+                  themeMode={themeMode}
+                  setThemeMode={setThemeMode}
+                />
+              )}
+            </View>
+            <View style={styles.tabBar}>
+              {TABS.map(([key, label]) => (
+                <Pressable
+                  key={key}
+                  style={[styles.tab, tab === key && styles.tabOn]}
+                  onPress={() => setTab(key)}
+                  accessibilityRole="tab"
+                  accessibilityLabel={label}
+                  accessibilityState={{ selected: tab === key }}
+                >
+                  <TabIcon tab={key} color={tab === key ? t.accent : t.muted} />
+                </Pressable>
+              ))}
+            </View>
+          </SafeAreaView>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
+    </ThemeContext.Provider>
   );
 }
 
 // ---------- Styles ----------
 
-const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#f8f9fa' },
-  title: { fontSize: 20, fontWeight: '700', textAlign: 'center', paddingVertical: 8 },
-  warning: { backgroundColor: '#fff3bf', color: '#212529', textAlign: 'center', padding: 8 },
-  chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 18, backgroundColor: '#e9ecef' },
-  chipOn: { backgroundColor: '#1971c2' },
-  chipAdd: { backgroundColor: '#dee2e6' },
-  chipText: { fontSize: 15, color: '#212529' },
-  chipTextOn: { color: '#fff', fontWeight: '600' },
-  hint: { textAlign: 'center', color: '#868e96', marginTop: 12, paddingHorizontal: 16 },
-  legend: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, marginTop: 10 },
-  legendText: { color: '#495057' },
-  zoomBar: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 10 },
-  zoomBtn: { width: 44, alignItems: 'center' },
-  zoomLabel: { width: 52, textAlign: 'center', color: '#495057' },
-  heatLegend: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 2, marginTop: 12 },
-  heatSwatch: { width: 24, height: 12, borderRadius: 2 },
-  undo: { backgroundColor: '#dee2e6', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'center', padding: 24 },
-  card: { backgroundColor: '#fff', borderRadius: 14, padding: 16 },
-  cardTitle: { fontSize: 18, fontWeight: '700', textAlign: 'center' },
-  shooterPicker: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: 12, marginBottom: 4 },
-  input: { borderWidth: 1, borderColor: '#ced4da', borderRadius: 8, padding: 10, fontSize: 16, marginTop: 12 },
-  btn: { paddingVertical: 14, borderRadius: 10, alignItems: 'center' },
-  btnText: { fontSize: 16, fontWeight: '600', color: '#212529' },
-  btnGray: { backgroundColor: '#e9ecef' },
-  btnBlue: { backgroundColor: '#1971c2' },
-  btnGreen: { backgroundColor: '#2f9e44' },
-  btnRed: { backgroundColor: '#e03131' },
-  panel: { marginTop: 16, marginHorizontal: 12, padding: 14, backgroundColor: '#fff', borderRadius: 12 },
-  popupReboundBtn: { flex: 1, justifyContent: 'center', paddingHorizontal: 8 },
-  reboundRow: { flexDirection: 'row', gap: 12, marginTop: 16, marginHorizontal: 12 },
-  reboundPanel: { flex: 1, marginTop: 0, marginHorizontal: 0 },
-  panelHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  panelTitle: { fontSize: 18, fontWeight: '700' },
-  panelScore: { fontSize: 24, fontWeight: '800' },
-  panelBtn: { flex: 1, height: 64, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  panelBtnText: { fontSize: 20, fontWeight: '700', color: '#fff' },
-  statCard: { backgroundColor: '#fff', borderRadius: 12, padding: 14 },
-  statName: { fontSize: 18, fontWeight: '700', marginBottom: 4 },
-  statLine: { fontSize: 16, marginTop: 2 },
-  statSmall: { fontSize: 13, color: '#868e96', marginTop: 6 },
-  tabBar: { flexDirection: 'row', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#ced4da', backgroundColor: '#fff' },
-  tab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderTopWidth: 2, borderTopColor: 'transparent' },
-  tabOn: { borderTopColor: '#1971c2' },
-});
+const LIGHT_COLORS = {
+  background: '#f8f9fa',
+  surface: '#ffffff',
+  heading: '#000000',
+  text: '#212529',
+  muted: '#868e96',
+  mutedStrong: '#495057',
+  chip: '#e9ecef',
+  control: '#dee2e6',
+  border: '#ced4da',
+  swatchBorder: '#adb5bd',
+  accent: '#1971c2',
+  backdrop: 'rgba(0,0,0,0.4)',
+  heatCourt: '#ffffff',
+  heatLine: '#868e96',
+  heatHoop: '#343a40',
+};
+
+const DARK_COLORS: typeof LIGHT_COLORS = {
+  background: '#121416',
+  surface: '#1f2326',
+  heading: '#f1f3f5',
+  text: '#f1f3f5',
+  muted: '#adb5bd',
+  mutedStrong: '#ced4da',
+  chip: '#2b3035',
+  control: '#343a40',
+  border: '#495057',
+  swatchBorder: '#868e96',
+  accent: '#4dabf7',
+  backdrop: 'rgba(0,0,0,0.6)',
+  heatCourt: '#343a40',
+  heatLine: '#ffffff',
+  heatHoop: '#ffffff',
+};
+
+const makeStyles = (t: typeof LIGHT_COLORS) =>
+  StyleSheet.create({
+    root: { flex: 1, backgroundColor: t.background },
+    title: { fontSize: 20, fontWeight: '700', textAlign: 'center', paddingVertical: 8, color: t.heading },
+    warning: { backgroundColor: '#fff3bf', color: '#212529', textAlign: 'center', padding: 8 },
+    chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 18, backgroundColor: t.chip },
+    chipOn: { backgroundColor: '#1971c2' },
+    chipAdd: { backgroundColor: t.control },
+    chipText: { fontSize: 15, color: t.text },
+    chipTextOn: { color: '#fff', fontWeight: '600' },
+    hint: { textAlign: 'center', color: t.muted, marginTop: 12, paddingHorizontal: 16 },
+    legend: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, marginTop: 10 },
+    legendText: { color: t.mutedStrong },
+    zoomBar: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 10 },
+    zoomBtn: { width: 44, alignItems: 'center' },
+    zoomLabel: { width: 52, textAlign: 'center', color: t.mutedStrong },
+    modeRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingBottom: 10 },
+    heatLegend: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 2, marginTop: 12 },
+    heatSwatch: { width: 24, height: 12, borderRadius: 2 },
+    undo: { backgroundColor: t.control, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8 },
+    backdrop: { flex: 1, backgroundColor: t.backdrop, justifyContent: 'center', padding: 24 },
+    card: { backgroundColor: t.surface, borderRadius: 14, padding: 16 },
+    cardTitle: { fontSize: 18, fontWeight: '700', textAlign: 'center', color: t.heading },
+    shooterPicker: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: 12, marginBottom: 4 },
+    input: { borderWidth: 1, borderColor: t.border, borderRadius: 8, padding: 10, fontSize: 16, marginTop: 12, color: t.text },
+    btn: { paddingVertical: 14, borderRadius: 10, alignItems: 'center' },
+    btnText: { fontSize: 16, fontWeight: '600', color: t.text },
+    btnGray: { backgroundColor: t.chip },
+    btnBlue: { backgroundColor: '#1971c2' },
+    btnGreen: { backgroundColor: '#2f9e44' },
+    btnRed: { backgroundColor: '#e03131' },
+    panel: { marginTop: 16, marginHorizontal: 12, padding: 14, backgroundColor: t.surface, borderRadius: 12 },
+    popupReboundBtn: { flex: 1, justifyContent: 'center', paddingHorizontal: 8 },
+    reboundRow: { flexDirection: 'row', gap: 12, marginTop: 16, marginHorizontal: 12 },
+    reboundPanel: { flex: 1, marginTop: 0, marginHorizontal: 0 },
+    panelHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    panelTitle: { fontSize: 18, fontWeight: '700', color: t.heading },
+    panelScore: { fontSize: 24, fontWeight: '800', color: t.heading },
+    panelBtn: { flex: 1, height: 64, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+    panelBtnText: { fontSize: 20, fontWeight: '700', color: '#fff' },
+    swatchRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 },
+    swatchRing: { padding: 2, borderRadius: 19, borderWidth: 2, borderColor: 'transparent' },
+    swatchRingOn: { borderColor: t.accent },
+    swatch: { width: 28, height: 28, borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, borderColor: t.swatchBorder },
+    statCard: { backgroundColor: t.surface, borderRadius: 12, padding: 14 },
+    statName: { fontSize: 18, fontWeight: '700', marginBottom: 4, color: t.heading },
+    statLine: { fontSize: 16, marginTop: 2, color: t.heading },
+    statSmall: { fontSize: 13, color: t.muted, marginTop: 6 },
+    tabBar: { flexDirection: 'row', borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: t.border, backgroundColor: t.surface },
+    tab: { flex: 1, paddingVertical: 10, alignItems: 'center', borderTopWidth: 2, borderTopColor: 'transparent' },
+    tabOn: { borderTopColor: t.accent },
+  });
+
+const LIGHT_THEME = { t: LIGHT_COLORS, styles: makeStyles(LIGHT_COLORS) };
+const DARK_THEME = { t: DARK_COLORS, styles: makeStyles(DARK_COLORS) };
+
+const ThemeContext = createContext(LIGHT_THEME);
+function useTheme() {
+  return useContext(ThemeContext);
+}
