@@ -9,10 +9,11 @@ import {
   StyleSheet,
   Share,
   Alert,
+  Keyboard,
   useColorScheme,
   useWindowDimensions,
 } from 'react-native';
-import Svg, { G, Rect, Circle, Line, Path } from 'react-native-svg';
+import Svg, { G, Rect, Circle, Line, Path, Text as SvgText } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
@@ -143,14 +144,14 @@ const MAX_ZOOM = 4;
 const ZOOM_STEP = 1.5;
 
 // The visible part of the court: zoom level plus the top-left corner, in drawing units.
-// At zoom 1 it shows half the court.
+// At zoom 1 it shows half the court, or as much as fits when filling the screen.
 type CourtView = { zoom: number; x: number; y: number };
 
-// The near half, wherever the rotation puts it in the drawing.
-const defaultView = (rotation: Rotation): CourtView => ({
+// Against the near baseline, wherever the rotation puts it in the drawing, centered across the court.
+const defaultView = (rotation: Rotation, viewW: number, viewH: number, baseW: number, baseH: number): CourtView => ({
   zoom: 1,
-  x: rotation === 270 ? HALF_COURT : 0,
-  y: rotation === 0 ? HALF_COURT : 0,
+  x: rotation === 270 ? viewW - baseW : rotation === 90 ? 0 : (viewW - baseW) / 2,
+  y: rotation === 0 ? viewH - baseH : rotation === 180 ? 0 : (viewH - baseH) / 2,
 });
 
 const clamp = (n: number, min: number, max: number) => Math.min(Math.max(n, min), max);
@@ -200,6 +201,7 @@ function CourtFrame({
   onTap,
   onTouchingChange,
   underLines,
+  fill = false,
   children,
 }: {
   rotation: Rotation;
@@ -209,21 +211,34 @@ function CourtFrame({
   onTap: (x: number, y: number) => void;
   onTouchingChange: (touching: boolean) => void;
   underLines?: React.ReactNode;
+  // Fill the parent's space instead of showing half the court at the screen's width.
+  fill?: boolean;
   children?: (zoom: number) => React.ReactNode;
 }) {
   const { styles } = useTheme();
   const { width } = useWindowDimensions();
+  const [area, setArea] = useState<{ width: number; height: number } | null>(null);
   const sideways = rotation % 180 !== 0;
-  // The whole court, and the part of it visible at zoom 1 (half).
+  // The whole court, and the part of it visible at zoom 1.
   const viewW = sideways ? COURT_H : COURT_W;
   const viewH = sideways ? COURT_W : COURT_H;
-  const baseW = sideways ? HALF_COURT : COURT_W;
-  const baseH = sideways ? COURT_W : HALF_COURT;
-  const w = Math.min(width - 24, 600);
-  const h = (w * baseH) / baseW;
-  const [view, setView] = useState<CourtView>(() => defaultView(rotation));
+  let w: number, h: number, baseW: number, baseH: number;
+  if (fill) {
+    // As much of the court as the area's shape allows, up to all of it.
+    w = area?.width ?? 1;
+    h = area?.height ?? 1;
+    const aspect = w / h;
+    baseW = Math.min(viewW, viewH * aspect);
+    baseH = baseW / aspect;
+  } else {
+    baseW = sideways ? HALF_COURT : COURT_W;
+    baseH = sideways ? COURT_W : HALF_COURT;
+    w = Math.min(width - 24, 600);
+    h = (w * baseH) / baseW;
+  }
+  const home = defaultView(rotation, viewW, viewH, baseW, baseH);
+  const [view, setView] = useState<CourtView>(home);
   const sw = 0.3 / view.zoom;
-  const home = defaultView(rotation);
   const atHome = view.zoom === home.zoom && view.x === home.x && view.y === home.y;
 
   // Gesture callbacks read the latest values from here.
@@ -242,7 +257,7 @@ function CourtFrame({
     if (activeGestures.current === 0) latest.current.onTouchingChange(false);
   };
 
-  useEffect(() => setView(defaultView(rotation)), [rotation]);
+  useEffect(() => setView(home), [rotation, baseW, baseH]);
 
   const stepZoom = (factor: number) =>
     setView((v) => {
@@ -303,30 +318,42 @@ function CourtFrame({
   const moves = useSimultaneousGestures(pinch, pan);
   const gesture = useCompetingGestures(moves, tap);
 
-  return (
-    <View>
-      <GestureDetector gesture={gesture}>
-        <View collapsable={false} style={{ width: w, height: h, alignSelf: 'center', borderRadius: 8, overflow: 'hidden' }}>
-          <View pointerEvents="none">
-            <Svg width={w} height={h} viewBox={`${view.x} ${view.y} ${baseW / view.zoom} ${baseH / view.zoom}`}>
-              <G transform={ROTATION_TRANSFORMS[rotation]}>
-                <Rect x={0} y={0} width={COURT_W} height={COURT_H} fill={background} />
-                {underLines}
-                <Rect x={0.15} y={0.15} width={COURT_W - 0.3} height={COURT_H - 0.3} fill="none" stroke={line} strokeWidth={sw} />
-                {/* half court line + center circle */}
-                <Line x1={0} y1={HALF_COURT} x2={COURT_W} y2={HALF_COURT} stroke={line} strokeWidth={sw} />
-                <Circle cx={25} cy={HALF_COURT} r={6} fill="none" stroke={line} strokeWidth={sw} />
+  const court = (
+    <GestureDetector gesture={gesture}>
+      <View collapsable={false} style={{ width: w, height: h, alignSelf: 'center', borderRadius: 8, overflow: 'hidden' }}>
+        <View pointerEvents="none">
+          <Svg width={w} height={h} viewBox={`${view.x} ${view.y} ${baseW / view.zoom} ${baseH / view.zoom}`}>
+            <G transform={ROTATION_TRANSFORMS[rotation]}>
+              <Rect x={0} y={0} width={COURT_W} height={COURT_H} fill={background} />
+              {underLines}
+              <Rect x={0.15} y={0.15} width={COURT_W - 0.3} height={COURT_H - 0.3} fill="none" stroke={line} strokeWidth={sw} />
+              {/* half court line + center circle */}
+              <Line x1={0} y1={HALF_COURT} x2={COURT_W} y2={HALF_COURT} stroke={line} strokeWidth={sw} />
+              <Circle cx={25} cy={HALF_COURT} r={6} fill="none" stroke={line} strokeWidth={sw} />
+              <HalfCourtLines line={line} hoop={hoop} sw={sw} />
+              <G transform={`translate(${COURT_W},${COURT_H}) rotate(180)`}>
                 <HalfCourtLines line={line} hoop={hoop} sw={sw} />
-                <G transform={`translate(${COURT_W},${COURT_H}) rotate(180)`}>
-                  <HalfCourtLines line={line} hoop={hoop} sw={sw} />
-                </G>
-                {children?.(view.zoom)}
               </G>
-            </Svg>
-          </View>
+              {children?.(view.zoom)}
+            </G>
+          </Svg>
         </View>
-      </GestureDetector>
-      <Text style={[styles.legendText, { textAlign: 'center', marginTop: 8 }]}>Drag the court to see the other half.</Text>
+      </View>
+    </GestureDetector>
+  );
+
+  return (
+    <View style={fill && { flex: 1 }}>
+      {fill ? (
+        <View style={{ flex: 1 }} onLayout={(e) => setArea({ width: e.nativeEvent.layout.width, height: e.nativeEvent.layout.height })}>
+          {area && court}
+        </View>
+      ) : (
+        <>
+          {court}
+          <Text style={[styles.legendText, { textAlign: 'center', marginTop: 8 }]}>Drag the court to see the other half.</Text>
+        </>
+      )}
       <View style={styles.zoomBar}>
         <Pressable
           onPress={() => stepZoom(1 / ZOOM_STEP)}
@@ -412,12 +439,14 @@ function Court({
   colors,
   onTapCourt,
   onTouchingChange,
+  fill,
 }: {
   shots: Shot[];
   rotation: Rotation;
   colors: CourtColors;
   onTapCourt: (x: number, y: number) => void;
   onTouchingChange: (touching: boolean) => void;
+  fill?: boolean;
 }) {
   return (
     <CourtFrame
@@ -428,6 +457,7 @@ function Court({
       onTap={onTapCourt}
       onTouchingChange={onTouchingChange}
       underLines={<CourtTextureLayer colors={colors} />}
+      fill={fill}
     >
       {(zoom) => shots.map((s) => <ShotMarker key={s.id} cx={s.x} cy={fy(s.y)} result={s.result} m={1 / zoom} colors={colors} />)}
     </CourtFrame>
@@ -447,16 +477,8 @@ function PlayerPicker({
   onSelect: (id: string | null) => void;
   onAdd: (name: string) => void;
 }) {
-  const { styles, t } = useTheme();
+  const { styles } = useTheme();
   const [adding, setAdding] = useState(false);
-  const [name, setName] = useState('');
-
-  const submit = () => {
-    const n = name.trim();
-    if (n) onAdd(n);
-    setName('');
-    setAdding(false);
-  };
 
   return (
     <View style={{ paddingVertical: 8 }}>
@@ -474,32 +496,63 @@ function PlayerPicker({
         </Pressable>
       </ScrollView>
 
-      <Modal transparent animationType="fade" visible={adding} onRequestClose={() => setAdding(false)}>
-        <View style={styles.backdrop}>
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>New player</Text>
-            <TextInput
-              value={name}
-              onChangeText={setName}
-              placeholder="Name"
-              placeholderTextColor={t.muted}
-              autoFocus
-              style={styles.input}
-              onSubmitEditing={submit}
-              returnKeyType="done"
-            />
-            <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
-              <Pressable style={[styles.btn, styles.btnGray, { flex: 1 }]} onPress={() => { setName(''); setAdding(false); }}>
-                <Text style={styles.btnText}>Cancel</Text>
-              </Pressable>
-              <Pressable style={[styles.btn, styles.btnBlue, { flex: 1 }]} onPress={submit}>
-                <Text style={[styles.btnText, { color: '#fff' }]}>Add</Text>
-              </Pressable>
-            </View>
+      <NamePrompt visible={adding} title="New player" placeholder="Name" onSubmit={onAdd} onClose={() => setAdding(false)} />
+    </View>
+  );
+}
+
+function NamePrompt({
+  visible,
+  title,
+  placeholder,
+  onSubmit,
+  onClose,
+}: {
+  visible: boolean;
+  title: string;
+  placeholder: string;
+  onSubmit: (name: string) => void;
+  onClose: () => void;
+}) {
+  const { styles, t } = useTheme();
+  const [name, setName] = useState('');
+
+  const close = () => {
+    setName('');
+    onClose();
+  };
+  const submit = () => {
+    const n = name.trim();
+    if (n) onSubmit(n);
+    close();
+  };
+
+  return (
+    <Modal transparent animationType="fade" visible={visible} onRequestClose={close}>
+      <View style={styles.backdrop}>
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>{title}</Text>
+          <TextInput
+            value={name}
+            onChangeText={setName}
+            placeholder={placeholder}
+            placeholderTextColor={t.muted}
+            autoFocus
+            style={styles.input}
+            onSubmitEditing={submit}
+            returnKeyType="done"
+          />
+          <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+            <Pressable style={[styles.btn, styles.btnGray, { flex: 1 }]} onPress={close}>
+              <Text style={styles.btnText}>Cancel</Text>
+            </Pressable>
+            <Pressable style={[styles.btn, styles.btnBlue, { flex: 1 }]} onPress={submit}>
+              <Text style={[styles.btnText, { color: '#fff' }]}>Add</Text>
+            </Pressable>
           </View>
         </View>
-      </Modal>
-    </View>
+      </View>
+    </Modal>
   );
 }
 
@@ -614,6 +667,7 @@ function ShotsScreen(props: {
   const [pending, setPending] = useState<{ x: number; y: number } | null>(null);
   const [pendingPlayer, setPendingPlayer] = useState<string | null>(null);
   const [touchingCourt, setTouchingCourt] = useState(false);
+  const [fullScreen, setFullScreen] = useState(false);
   // With "All" selected, the shooter is picked in the popup (or implied if there's only one player).
   const shooter = selected ?? pendingPlayer ?? (players.length === 1 ? players[0].id : null);
   const closePending = () => {
@@ -621,20 +675,68 @@ function ShotsScreen(props: {
     setPendingPlayer(null);
   };
   const visible = useMemo(() => shots.filter((s) => selected === null || s.playerId === selected), [shots, selected]);
+  const onTapCourt = (x: number, y: number) => {
+    if (players.length > 0) setPending({ x, y });
+  };
+
+  // Inside the full screen view while it's open, since a popup can't show over it from outside.
+  const addStat = (
+    <Modal transparent animationType="fade" visible={pending !== null} onRequestClose={closePending}>
+      <View style={styles.backdrop}>
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Add stat</Text>
+          {selected === null && (
+            <View style={styles.shooterPicker}>
+              {players.map((p) => (
+                <Pressable key={p.id} onPress={() => setPendingPlayer(p.id)} style={[styles.chip, shooter === p.id && styles.chipOn]}>
+                  <Text style={[styles.chipText, shooter === p.id && styles.chipTextOn]}>{p.name}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+          {RESULTS.map((r) => (
+            <Pressable
+              key={r.key}
+              disabled={!shooter}
+              style={[styles.btn, isMade(r.key) ? styles.btnGreen : styles.btnRed, { marginTop: 8 }, !shooter && { opacity: 0.4 }]}
+              onPress={() => {
+                if (pending && shooter) addShot({ playerId: shooter, x: pending.x, y: pending.y, result: r.key });
+                closePending();
+              }}
+            >
+              <Text style={[styles.btnText, { color: '#fff' }]}>{r.label}</Text>
+            </Pressable>
+          ))}
+          {selected === null && (
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+              {POPUP_REBOUNDS.map(({ key, label }) => (
+                <Pressable
+                  key={key}
+                  disabled={!shooter}
+                  style={[styles.btn, styles.btnBlue, styles.popupReboundBtn, !shooter && { opacity: 0.4 }]}
+                  onPress={() => {
+                    if (shooter) addRebound(shooter, key);
+                    closePending();
+                  }}
+                >
+                  <Text style={[styles.btnText, { color: '#fff', textAlign: 'center' }]}>{label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+          <Pressable style={[styles.btn, styles.btnGray, { marginTop: 12 }]} onPress={closePending}>
+            <Text style={styles.btnText}>Cancel</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
 
   return (
     <View style={{ flex: 1 }}>
       <PlayerPicker players={players} selected={selected} onSelect={setSelected} onAdd={addPlayer} />
       <ScrollView scrollEnabled={!touchingCourt} contentContainerStyle={{ paddingBottom: 16 }}>
-        <Court
-          shots={visible}
-          rotation={rotation}
-          colors={colors}
-          onTapCourt={(x, y) => {
-            if (players.length > 0) setPending({ x, y });
-          }}
-          onTouchingChange={setTouchingCourt}
-        />
+        <Court shots={visible} rotation={rotation} colors={colors} onTapCourt={onTapCourt} onTouchingChange={setTouchingCourt} />
         <Text style={styles.hint}>
           {selected
             ? 'Tap the court where the shot was taken.'
@@ -654,59 +756,40 @@ function ShotsScreen(props: {
             <ReboundPanel playerId={selected} rebounds={rebounds} addRebound={addRebound} undoRebound={undoRebound} />
           </>
         )}
-        <Pressable onPress={rotateCourt} style={[styles.undo, { marginTop: 16, alignSelf: 'center' }]}>
-          <Text style={styles.btnText}>Rotate court</Text>
-        </Pressable>
+        <View style={styles.courtActions}>
+          <Pressable onPress={rotateCourt} style={styles.undo}>
+            <Text style={styles.btnText}>Rotate court</Text>
+          </Pressable>
+          {selected === null && (
+            <Pressable onPress={() => setFullScreen(true)} style={styles.undo}>
+              <Text style={styles.btnText}>Full screen</Text>
+            </Pressable>
+          )}
+        </View>
       </ScrollView>
 
-      <Modal transparent animationType="fade" visible={pending !== null} onRequestClose={closePending}>
-        <View style={styles.backdrop}>
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Add stat</Text>
-            {selected === null && (
-              <View style={styles.shooterPicker}>
-                {players.map((p) => (
-                  <Pressable key={p.id} onPress={() => setPendingPlayer(p.id)} style={[styles.chip, shooter === p.id && styles.chipOn]}>
-                    <Text style={[styles.chipText, shooter === p.id && styles.chipTextOn]}>{p.name}</Text>
-                  </Pressable>
-                ))}
+      {!fullScreen && addStat}
+
+      <Modal animationType="fade" visible={fullScreen} onRequestClose={() => setFullScreen(false)}>
+        {/* A modal is its own native view tree, so gestures and safe areas need their own roots. */}
+        <GestureHandlerRootView style={{ flex: 1 }}>
+          <SafeAreaProvider>
+            <SafeAreaView style={styles.root}>
+              <View style={styles.fullScreenBar}>
+                <Pressable onPress={rotateCourt} style={styles.undo}>
+                  <Text style={styles.btnText}>Rotate court</Text>
+                </Pressable>
+                <Pressable onPress={() => setFullScreen(false)} style={[styles.btn, styles.btnBlue, { paddingHorizontal: 14, paddingVertical: 10 }]}>
+                  <Text style={[styles.btnText, { color: '#fff' }]}>Exit full screen</Text>
+                </Pressable>
               </View>
-            )}
-            {RESULTS.map((r) => (
-              <Pressable
-                key={r.key}
-                disabled={!shooter}
-                style={[styles.btn, isMade(r.key) ? styles.btnGreen : styles.btnRed, { marginTop: 8 }, !shooter && { opacity: 0.4 }]}
-                onPress={() => {
-                  if (pending && shooter) addShot({ playerId: shooter, x: pending.x, y: pending.y, result: r.key });
-                  closePending();
-                }}
-              >
-                <Text style={[styles.btnText, { color: '#fff' }]}>{r.label}</Text>
-              </Pressable>
-            ))}
-            {selected === null && (
-              <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
-                {POPUP_REBOUNDS.map(({ key, label }) => (
-                  <Pressable
-                    key={key}
-                    disabled={!shooter}
-                    style={[styles.btn, styles.btnBlue, styles.popupReboundBtn, !shooter && { opacity: 0.4 }]}
-                    onPress={() => {
-                      if (shooter) addRebound(shooter, key);
-                      closePending();
-                    }}
-                  >
-                    <Text style={[styles.btnText, { color: '#fff', textAlign: 'center' }]}>{label}</Text>
-                  </Pressable>
-                ))}
+              <View style={{ flex: 1, paddingHorizontal: 8, paddingBottom: 8 }}>
+                <Court shots={visible} rotation={rotation} colors={colors} onTapCourt={onTapCourt} onTouchingChange={() => {}} fill />
               </View>
-            )}
-            <Pressable style={[styles.btn, styles.btnGray, { marginTop: 12 }]} onPress={closePending}>
-              <Text style={styles.btnText}>Cancel</Text>
-            </Pressable>
-          </View>
-        </View>
+            </SafeAreaView>
+          </SafeAreaProvider>
+          {fullScreen && addStat}
+        </GestureHandlerRootView>
       </Modal>
     </View>
   );
@@ -935,6 +1018,846 @@ function HeatMapScreen({
   );
 }
 
+// ---------- Shot practice ----------
+
+type PracticeSpot = 'shortCorner' | 'corner' | 'elbow' | 'freeThrow' | 'topOfKey' | 'wing' | 'slot' | 'block';
+
+type PracticeLocation = { id: string; name: string; customShots: { id: string; name: string }[] };
+// shot is a PracticeShot id, or the id of one of the location's custom shots.
+type PracticeSession = { id: string; locationId: string; shot: string; made: number; attempts: number; date: number };
+
+// x, y in court feet like shots, for the right side. Spots off the middle are mirrored onto the left side.
+// Labels sit toward half court from the spot, or toward the baseline if `below`; `edge` labels hug the sideline.
+const PRACTICE_SPOTS: { key: PracticeSpot; label: string; short: string; x: number; y: number; below?: boolean; edge?: boolean }[] = [
+  { key: 'shortCorner', label: 'Short Corner', short: 'Short corner', x: 9, y: 3.5, below: true },
+  { key: 'corner', label: 'Corner', short: 'Corner', x: 1.5, y: 4, edge: true },
+  { key: 'elbow', label: 'Elbow (High Post)', short: 'Elbow', x: 17, y: 19 },
+  { key: 'freeThrow', label: 'Free Throw', short: 'Free throw', x: 25, y: 19 },
+  { key: 'topOfKey', label: 'Top of the Key', short: 'Top of key', x: 25, y: 30.5 },
+  { key: 'wing', label: 'Wing', short: 'Wing', x: 7.5, y: 22 },
+  { key: 'slot', label: 'Slot', short: 'Slot', x: 15.4, y: 28.3 },
+  { key: 'block', label: 'Block (Low Post)', short: 'Block', x: 15, y: 7 },
+];
+
+type CourtSide = 'left' | 'right';
+
+// Sides are as the shooter sees them facing the basket: left is the high-x side of the court.
+const sideAt = (x: number): CourtSide => (x > RIM_X ? 'left' : 'right');
+
+// Spots off the middle are stored separately for each side, e.g. "corner-left".
+const practiceShotId = (spot: PracticeSpot, side: CourtSide | null) => (side ? `${spot}-${side}` : spot);
+
+const PRACTICE_SHOTS: { id: string; name: string }[] = PRACTICE_SPOTS.flatMap(({ key, label, x }) =>
+  x === RIM_X
+    ? [{ id: key, name: label }]
+    : [
+        { id: practiceShotId(key, 'left'), name: `Left ${label}` },
+        { id: practiceShotId(key, 'right'), name: `Right ${label}` },
+      ],
+);
+
+// Applies ROTATION_TRANSFORMS to a point on the unrotated drawing.
+const rotatePoint = (x: number, y: number, rotation: Rotation): [number, number] => {
+  switch (rotation) {
+    case 90:
+      return [COURT_H - y, x];
+    case 180:
+      return [COURT_W - x, COURT_H - y];
+    case 270:
+      return [y, COURT_W - x];
+    default:
+      return [x, y];
+  }
+};
+
+// The near half of the court, wherever the rotation puts it in the drawing.
+const NEAR_HALF_VIEWBOX: Record<Rotation, string> = {
+  0: `0 ${HALF_COURT} ${COURT_W} ${HALF_COURT}`,
+  90: `0 0 ${HALF_COURT} ${COURT_W}`,
+  180: `0 0 ${COURT_W} ${HALF_COURT}`,
+  270: `${HALF_COURT} 0 ${HALF_COURT} ${COURT_W}`,
+};
+
+// Which way on screen points away from the baseline, toward half court.
+const HALF_COURT_DIRECTION: Record<Rotation, 'up' | 'right' | 'down' | 'left'> = { 0: 'up', 90: 'right', 180: 'down', 270: 'left' };
+const OPPOSITE = { up: 'down', down: 'up', left: 'right', right: 'left' } as const;
+
+const practiceLine = (list: PracticeSession[]) => {
+  const made = list.reduce((sum, s) => sum + s.made, 0);
+  const attempts = list.reduce((sum, s) => sum + s.attempts, 0);
+  const pct = attempts ? ` (${Math.round((100 * made) / attempts)}%)` : '';
+  return `${made}/${attempts}${pct}`;
+};
+
+const formatDate = (date: number) =>
+  new Date(date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+
+function PracticeCourt({
+  colors,
+  rotation,
+  selected,
+  onSelect,
+}: {
+  colors: CourtColors;
+  rotation: Rotation;
+  selected: string | null;
+  onSelect: (shot: string) => void;
+}) {
+  const { t } = useTheme();
+  const { width } = useWindowDimensions();
+  const sideways = rotation % 180 !== 0;
+  const w = Math.min(width - 24, 600);
+  const h = sideways ? (w * COURT_W) / HALF_COURT : (w * HALF_COURT) / COURT_W;
+  const sw = 0.3;
+  return (
+    <View style={{ width: w, height: h, alignSelf: 'center', borderRadius: 8, overflow: 'hidden' }}>
+      <Svg width="100%" height="100%" viewBox={NEAR_HALF_VIEWBOX[rotation]}>
+        <G transform={ROTATION_TRANSFORMS[rotation]}>
+          <Rect x={0} y={0} width={COURT_W} height={COURT_H} fill={colors.court} />
+          <CourtTextureLayer colors={colors} />
+          <Rect x={0.15} y={0.15} width={COURT_W - 0.3} height={COURT_H - 0.3} fill="none" stroke={colors.line} strokeWidth={sw} />
+          <Line x1={0} y1={HALF_COURT} x2={COURT_W} y2={HALF_COURT} stroke={colors.line} strokeWidth={sw} />
+          <Circle cx={25} cy={HALF_COURT} r={6} fill="none" stroke={colors.line} strokeWidth={sw} />
+          <HalfCourtLines line={colors.line} hoop={colors.hoop} sw={sw} />
+        </G>
+        {/* Spots are placed outside the rotation so their labels stay upright. */}
+        {PRACTICE_SPOTS.flatMap((spot) =>
+          (spot.x === RIM_X ? [spot.x] : [spot.x, COURT_W - spot.x]).map((x) => {
+            const id = practiceShotId(spot.key, x === RIM_X ? null : sideAt(x));
+            const on = selected === id;
+            const [sx, sy] = rotatePoint(x, fy(spot.y), rotation);
+            const dir = spot.below ? OPPOSITE[HALF_COURT_DIRECTION[rotation]] : HALF_COURT_DIRECTION[rotation];
+            const vertical = dir === 'up' || dir === 'down';
+            const edgeX = sx < COURT_W / 2 ? 0.4 : COURT_W - 0.4;
+            const label =
+              vertical
+                ? {
+                    x: spot.edge ? edgeX : sx,
+                    y: dir === 'up' ? sy - 1.9 : sy + 2.7,
+                    anchor: spot.edge ? (edgeX < COURT_W / 2 ? 'start' : 'end') : 'middle',
+                  }
+                : { x: dir === 'right' ? sx + 1.8 : sx - 1.8, y: sy + 0.55, anchor: dir === 'right' ? 'start' : 'end' };
+            return (
+              <G key={id} onPress={() => onSelect(id)}>
+                {/* a bigger, invisible circle so the spot is easy to tap */}
+                <Circle cx={sx} cy={sy} r={3} fill="#000" fillOpacity={0} />
+                <Circle
+                  cx={sx}
+                  cy={sy}
+                  r={1.2}
+                  fill={on ? t.accent : colors.line}
+                  fillOpacity={on ? 1 : 0.5}
+                  stroke={on ? '#fff' : colors.line}
+                  strokeWidth={0.3}
+                />
+                <SvgText
+                  x={label.x}
+                  y={label.y}
+                  fontSize={1.6}
+                  fontWeight={on ? '800' : '600'}
+                  fill={on ? t.accent : colors.line}
+                  textAnchor={label.anchor as 'start' | 'middle' | 'end'}
+                >
+                  {spot.short}
+                </SvgText>
+              </G>
+            );
+          }),
+        )}
+      </Svg>
+    </View>
+  );
+}
+
+function LocationPicker({
+  locations,
+  selected,
+  onSelect,
+  onAdd,
+  onLongPress,
+}: {
+  locations: PracticeLocation[];
+  selected: PracticeLocation | undefined;
+  onSelect: (id: string) => void;
+  onAdd?: () => void;
+  onLongPress?: (location: PracticeLocation) => void;
+}) {
+  const { styles } = useTheme();
+  return (
+    <View style={{ paddingVertical: 8 }}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 12, gap: 8 }}>
+        {locations.map((l) => (
+          <Pressable
+            key={l.id}
+            onPress={() => onSelect(l.id)}
+            onLongPress={onLongPress && (() => onLongPress(l))}
+            accessibilityState={{ selected: l === selected }}
+            style={[styles.chip, l === selected && styles.chipOn]}
+          >
+            <Text style={[styles.chipText, l === selected && styles.chipTextOn]}>{l.name}</Text>
+          </Pressable>
+        ))}
+        {onAdd && (
+          <Pressable onPress={onAdd} style={[styles.chip, styles.chipAdd]}>
+            <Text style={styles.chipText}>+ Location</Text>
+          </Pressable>
+        )}
+      </ScrollView>
+    </View>
+  );
+}
+
+const startOfDay = (date: number) => new Date(date).setHours(0, 0, 0, 0);
+
+const addDays = (date: number, days: number) => {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d.getTime();
+};
+
+const WEEKDAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+// A month grid of days; days after today can't be picked.
+function CalendarPicker({ value, onChange }: { value: number; onChange: (day: number) => void }) {
+  const { styles } = useTheme();
+  const [month, setMonth] = useState(() => new Date(value).setDate(1));
+  const m = new Date(month);
+  const today = startOfDay(Date.now());
+  const thisMonth = new Date(today).setDate(1);
+  const daysInMonth = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
+  const cells = [
+    ...Array<null>(m.getDay()).fill(null),
+    ...Array.from({ length: daysInMonth }, (_, i) => new Date(m.getFullYear(), m.getMonth(), i + 1).getTime()),
+  ];
+  const stepMonth = (step: number) => setMonth(new Date(m.getFullYear(), m.getMonth() + step, 1).getTime());
+
+  return (
+    <View style={{ marginTop: 8 }}>
+      <View style={styles.calendarHeader}>
+        <Pressable onPress={() => stepMonth(-1)} accessibilityLabel="Previous month" style={styles.calendarNav}>
+          <Text style={styles.btnText}>‹</Text>
+        </Pressable>
+        <Text style={styles.btnText}>{m.toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</Text>
+        <Pressable
+          onPress={() => stepMonth(1)}
+          disabled={month >= thisMonth}
+          accessibilityLabel="Next month"
+          style={[styles.calendarNav, month >= thisMonth && { opacity: 0.3 }]}
+        >
+          <Text style={styles.btnText}>›</Text>
+        </Pressable>
+      </View>
+      <View style={styles.calendarGrid}>
+        {WEEKDAY_LETTERS.map((d, i) => (
+          <View key={`weekday-${i}`} style={styles.calendarCell}>
+            <Text style={styles.statSmall}>{d}</Text>
+          </View>
+        ))}
+        {cells.map((day, i) =>
+          day === null ? (
+            <View key={`blank-${i}`} style={styles.calendarCell} />
+          ) : (
+            <Pressable
+              key={day}
+              onPress={() => onChange(day)}
+              disabled={day > today}
+              accessibilityRole="button"
+              accessibilityLabel={formatDate(day)}
+              accessibilityState={{ selected: day === value }}
+              style={styles.calendarCell}
+            >
+              <View style={[styles.calendarDay, day === value && styles.calendarDayOn, day > today && { opacity: 0.3 }]}>
+                <Text style={[styles.chipText, day === value && styles.chipTextOn]}>{new Date(day).getDate()}</Text>
+              </View>
+            </Pressable>
+          ),
+        )}
+      </View>
+    </View>
+  );
+}
+
+function ShotPracticeScreen({
+  locations,
+  sessions,
+  selected,
+  setSelected,
+  addLocation,
+  deleteLocation,
+  addCustomShot,
+  deleteCustomShot,
+  addSession,
+  deleteSession,
+  colors,
+  rotation,
+  rotateCourt,
+}: {
+  locations: PracticeLocation[];
+  sessions: PracticeSession[];
+  selected: string | null;
+  setSelected: (id: string) => void;
+  addLocation: (name: string) => void;
+  deleteLocation: (id: string) => void;
+  addCustomShot: (locationId: string, name: string) => string;
+  deleteCustomShot: (locationId: string, shotId: string) => void;
+  addSession: (s: Omit<PracticeSession, 'id'>) => void;
+  deleteSession: (id: string) => void;
+  colors: CourtColors;
+  rotation: Rotation;
+  rotateCourt: () => void;
+}) {
+  const { styles, t } = useTheme();
+  const [shot, setShot] = useState<string | null>(null);
+  const [addingLocation, setAddingLocation] = useState(false);
+  const [addingShot, setAddingShot] = useState(false);
+  const [entering, setEntering] = useState(false);
+  const [made, setMade] = useState('');
+  const [attempts, setAttempts] = useState('');
+  const [day, setDay] = useState(() => startOfDay(Date.now()));
+  const [pickingDay, setPickingDay] = useState(false);
+
+  const location = locations.find((l) => l.id === selected) ?? locations[0];
+  const here = useMemo(() => sessions.filter((s) => s.locationId === location?.id), [sessions, location]);
+  const shotOptions = [...PRACTICE_SHOTS, ...(location?.customShots ?? [])];
+  const current = shotOptions.find((s) => s.id === shot);
+  const history = current ? here.filter((s) => s.shot === current.id).sort((a, b) => b.date - a.date) : [];
+  const practiced = shotOptions.filter((s) => here.some((x) => x.shot === s.id));
+
+  const complete = /^\d+$/.test(made) && /^\d+$/.test(attempts);
+  const tooMany = complete && Number(made) > Number(attempts);
+  const canSave = complete && Number(attempts) > 0 && !tooMany;
+
+  const toggleShot = (id: string) => setShot((prev) => (prev === id ? null : id));
+  const openEntry = () => {
+    setDay(startOfDay(Date.now()));
+    setEntering(true);
+  };
+  const closeEntry = () => {
+    setEntering(false);
+    setPickingDay(false);
+    setMade('');
+    setAttempts('');
+  };
+  const save = () => {
+    if (!canSave || !location || !current) return;
+    // Today keeps the current time; an earlier day is saved at noon.
+    const date = day === startOfDay(Date.now()) ? Date.now() : day + 12 * 60 * 60 * 1000;
+    addSession({ locationId: location.id, shot: current.id, made: Number(made), attempts: Number(attempts), date });
+    closeEntry();
+  };
+
+  const confirmDelete = (title: string, message: string | undefined, onDelete: () => void) =>
+    Alert.alert(title, message, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: onDelete },
+    ]);
+  const resultsNote = (count: number) =>
+    count ? `This also deletes its ${count} saved result${count === 1 ? '' : 's'}.` : undefined;
+
+  return (
+    <View style={{ flex: 1 }}>
+      <LocationPicker
+        locations={locations}
+        selected={location}
+        onSelect={setSelected}
+        onAdd={() => setAddingLocation(true)}
+        onLongPress={(l) =>
+          confirmDelete(`Delete ${l.name}?`, resultsNote(sessions.filter((s) => s.locationId === l.id).length), () =>
+            deleteLocation(l.id),
+          )
+        }
+      />
+
+      {!location ? (
+        <Text style={styles.hint}>Add a location, like "Home Driveway" or "School court", to get started.</Text>
+      ) : (
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 16 }}>
+          <PracticeCourt colors={colors} rotation={rotation} selected={shot} onSelect={toggleShot} />
+          <Pressable onPress={rotateCourt} style={[styles.undo, { marginTop: 10, alignSelf: 'center' }]}>
+            <Text style={styles.btnText}>Rotate court</Text>
+          </Pressable>
+          <View style={styles.shotChips}>
+            {shotOptions.map((s) => {
+              const custom = !PRACTICE_SHOTS.some(({ id }) => id === s.id);
+              return (
+                <Pressable
+                  key={s.id}
+                  onPress={() => toggleShot(s.id)}
+                  onLongPress={
+                    custom
+                      ? () =>
+                          confirmDelete(`Delete ${s.name}?`, resultsNote(here.filter((x) => x.shot === s.id).length), () => {
+                            deleteCustomShot(location.id, s.id);
+                            if (shot === s.id) setShot(null);
+                          })
+                      : undefined
+                  }
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: shot === s.id }}
+                  style={[styles.chip, shot === s.id && styles.chipOn]}
+                >
+                  <Text style={[styles.chipText, shot === s.id && styles.chipTextOn]}>{s.name}</Text>
+                </Pressable>
+              );
+            })}
+            <Pressable onPress={() => setAddingShot(true)} style={[styles.chip, styles.chipAdd]}>
+              <Text style={styles.chipText}>+ Custom shot</Text>
+            </Pressable>
+          </View>
+
+          {current ? (
+            <View style={styles.panel}>
+              <Text style={styles.panelTitle}>{current.name}</Text>
+              <Text style={styles.statLine}>Total {practiceLine(history)}</Text>
+              <Pressable style={[styles.btn, styles.btnBlue, { marginTop: 12 }]} onPress={openEntry}>
+                <Text style={[styles.btnText, { color: '#fff' }]}>+ Add results</Text>
+              </Pressable>
+              {history.length === 0 && <Text style={styles.statSmall}>No results yet at {location.name}.</Text>}
+              {history.map((s) => (
+                <View key={s.id} style={styles.practiceRow}>
+                  <Text style={[styles.statLine, { flex: 1 }]}>{formatDate(s.date)}</Text>
+                  <Text style={styles.statLine}>{practiceLine([s])}</Text>
+                  <Pressable
+                    onPress={() => confirmDelete('Delete this result?', undefined, () => deleteSession(s.id))}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Delete result from ${formatDate(s.date)}`}
+                    style={{ paddingLeft: 14 }}
+                  >
+                    <Text style={styles.legendText}>✕</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+          ) : (
+            <View style={styles.panel}>
+              <Text style={styles.panelTitle}>{location.name}</Text>
+              {practiced.length === 0 && (
+                <Text style={styles.statSmall}>Tap a spot on the court or pick a shot to log your makes and attempts.</Text>
+              )}
+              {practiced.map((s) => (
+                <Pressable key={s.id} onPress={() => setShot(s.id)} style={styles.practiceRow}>
+                  <Text style={[styles.statLine, { flex: 1 }]}>{s.name}</Text>
+                  <Text style={styles.statLine}>{practiceLine(here.filter((x) => x.shot === s.id))}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+          <Text style={styles.hint}>Long-press a location or custom shot to delete it.</Text>
+        </ScrollView>
+      )}
+
+      <NamePrompt
+        visible={addingLocation}
+        title="New location"
+        placeholder="e.g. Park by my house"
+        onSubmit={addLocation}
+        onClose={() => setAddingLocation(false)}
+      />
+      <NamePrompt
+        visible={addingShot}
+        title="Custom shot"
+        placeholder="e.g. Left-hand floater"
+        onSubmit={(name) => location && setShot(addCustomShot(location.id, name))}
+        onClose={() => setAddingShot(false)}
+      />
+      <Modal transparent animationType="fade" visible={entering && current !== undefined} onRequestClose={closeEntry}>
+        <View style={styles.backdrop}>
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>{current?.name}</Text>
+            <Text style={[styles.statSmall, { textAlign: 'center' }]}>{location?.name}</Text>
+            <Text style={styles.statSmall}>Date</Text>
+            <Pressable
+              onPress={() => {
+                Keyboard.dismiss();
+                setPickingDay((prev) => !prev);
+              }}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: pickingDay }}
+              style={[styles.input, styles.dateButton]}
+            >
+              <Text style={styles.chipText}>{day === startOfDay(Date.now()) ? `Today, ${formatDate(day)}` : formatDate(day)}</Text>
+              <Text style={styles.legendText}>{pickingDay ? '▴' : '▾'}</Text>
+            </Pressable>
+            {pickingDay && (
+              <CalendarPicker
+                value={day}
+                onChange={(d) => {
+                  setDay(d);
+                  setPickingDay(false);
+                }}
+              />
+            )}
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.statSmall}>Made</Text>
+                <TextInput
+                  value={made}
+                  onChangeText={setMade}
+                  keyboardType="number-pad"
+                  placeholder="0"
+                  placeholderTextColor={t.muted}
+                  autoFocus
+                  onFocus={() => setPickingDay(false)}
+                  style={styles.input}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.statSmall}>Attempts</Text>
+                <TextInput
+                  value={attempts}
+                  onChangeText={setAttempts}
+                  keyboardType="number-pad"
+                  placeholder="0"
+                  placeholderTextColor={t.muted}
+                  onFocus={() => setPickingDay(false)}
+                  style={styles.input}
+                  onSubmitEditing={save}
+                  returnKeyType="done"
+                />
+              </View>
+            </View>
+            {tooMany && <Text style={[styles.statSmall, { color: '#e03131' }]}>Made can't be more than attempts.</Text>}
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+              <Pressable style={[styles.btn, styles.btnGray, { flex: 1 }]} onPress={closeEntry}>
+                <Text style={styles.btnText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.btn, styles.btnBlue, { flex: 1 }, !canSave && { opacity: 0.4 }]}
+                onPress={save}
+                disabled={!canSave}
+              >
+                <Text style={[styles.btnText, { color: '#fff' }]}>Save</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+// ---------- Practice charts ----------
+
+type ChartRange = 'week' | 'month' | 'year' | 'all';
+
+const CHART_RANGES: { key: ChartRange; label: string; summary: string }[] = [
+  { key: 'week', label: '1 Week', summary: 'Last 7 days' },
+  { key: 'month', label: '1 Month', summary: 'Last 30 days' },
+  { key: 'year', label: '1 Year', summary: 'Last 12 months' },
+  { key: 'all', label: 'All Time', summary: 'All time' },
+];
+
+// How much time each point on the chart covers.
+type ChartBucket = 'day' | 'week' | 'month';
+
+const bucketStart = (date: number, bucket: ChartBucket) => {
+  const d = new Date(startOfDay(date));
+  if (bucket === 'week') d.setDate(d.getDate() - d.getDay());
+  if (bucket === 'month') d.setDate(1);
+  return d.getTime();
+};
+
+const nextBucket = (start: number, bucket: ChartBucket) => {
+  const d = new Date(start);
+  if (bucket === 'month') d.setMonth(d.getMonth() + 1);
+  else d.setDate(d.getDate() + (bucket === 'week' ? 7 : 1));
+  return d.getTime();
+};
+
+const bucketLabel = (start: number, bucket: ChartBucket) =>
+  bucket === 'day'
+    ? formatDate(start)
+    : bucket === 'week'
+    ? `Week of ${new Date(start).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
+    : new Date(start).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+
+const axisLabel = (start: number, bucket: ChartBucket) =>
+  new Date(start).toLocaleDateString(undefined, bucket === 'month' ? { month: 'short', year: '2-digit' } : { month: 'short', day: 'numeric' });
+
+// The first day shown and how the time is split up. All time picks a bucket to fit how long you've practiced.
+const chartPeriod = (range: ChartRange, sessions: PracticeSession[]): { start: number; bucket: ChartBucket } => {
+  const today = startOfDay(Date.now());
+  if (range === 'week') return { start: addDays(today, -6), bucket: 'day' };
+  if (range === 'month') return { start: addDays(today, -29), bucket: 'day' };
+  if (range === 'year') {
+    const d = new Date(today);
+    d.setFullYear(d.getFullYear() - 1);
+    return { start: addDays(d.getTime(), 1), bucket: 'week' };
+  }
+  const first = sessions.reduce((min, s) => Math.min(min, startOfDay(s.date)), today);
+  const days = (today - first) / (24 * 60 * 60 * 1000);
+  return { start: first, bucket: days < 31 ? 'day' : days <= 366 ? 'week' : 'month' };
+};
+
+// A round number at least n, for the top of the attempts axis.
+const niceMax = (n: number) => {
+  const p = 10 ** Math.floor(Math.log10(n));
+  return [1, 2, 5, 10].map((m) => m * p).find((v) => v >= n) ?? n;
+};
+
+const CHART_H = 220;
+const CHART_PAD = { left: 40, right: 36, top: 10, bottom: 24 };
+const PCT_TICKS = [0, 0.25, 0.5, 0.75, 1];
+
+type ChartSeries = { id: string; color: string; points: { i: number; pct: number }[] };
+
+function PracticeChart({
+  buckets,
+  bucket,
+  series,
+  attempts,
+  active,
+  onSelect,
+}: {
+  buckets: number[];
+  bucket: ChartBucket;
+  series: ChartSeries[];
+  attempts: number[];
+  active: number | null;
+  onSelect: (i: number) => void;
+}) {
+  const { t } = useTheme();
+  const { width } = useWindowDimensions();
+  const w = Math.min(width - 24, 600);
+  const plotW = w - CHART_PAD.left - CHART_PAD.right;
+  const plotH = CHART_H - CHART_PAD.top - CHART_PAD.bottom;
+  const bottom = CHART_PAD.top + plotH;
+  const slot = plotW / buckets.length;
+  const cx = (i: number) => CHART_PAD.left + slot * (i + 0.5);
+  const py = (pct: number) => CHART_PAD.top + plotH * (1 - pct);
+  const maxAttempts = niceMax(Math.max(1, ...attempts));
+  const ay = (n: number) => CHART_PAD.top + plotH * (1 - n / maxAttempts);
+  const barW = Math.max(Math.min(slot - 2, 18), 1);
+  const labelEvery = Math.ceil(buckets.length / 5);
+
+  return (
+    <Svg width={w} height={CHART_H}>
+      {PCT_TICKS.map((p) => (
+        <G key={p}>
+          <Line x1={CHART_PAD.left} x2={w - CHART_PAD.right} y1={py(p)} y2={py(p)} stroke={t.grid} strokeWidth={1} />
+          <SvgText x={CHART_PAD.left - 6} y={py(p) + 3.5} fontSize={10} fill={t.muted} textAnchor="end">
+            {`${p * 100}%`}
+          </SvgText>
+        </G>
+      ))}
+      {[0, maxAttempts / 2, maxAttempts].filter(Number.isInteger).map((n) => (
+        <SvgText key={n} x={w - CHART_PAD.right + 6} y={ay(n) + 3.5} fontSize={10} fill={t.muted} textAnchor="start">
+          {`${n}`}
+        </SvgText>
+      ))}
+      {attempts.map(
+        (n, i) =>
+          n > 0 && (
+            <Rect key={i} x={cx(i) - barW / 2} y={ay(n)} width={barW} height={bottom - ay(n)} rx={Math.min(2, barW / 2)} fill={t.bar} />
+          ),
+      )}
+      <Line x1={CHART_PAD.left} x2={w - CHART_PAD.right} y1={bottom} y2={bottom} stroke={t.border} strokeWidth={1} />
+      {buckets.map(
+        (start, i) =>
+          (buckets.length - 1 - i) % labelEvery === 0 && (
+            <SvgText key={start} x={cx(i)} y={CHART_H - 6} fontSize={10} fill={t.muted} textAnchor="middle">
+              {axisLabel(start, bucket)}
+            </SvgText>
+          ),
+      )}
+      {active !== null && <Line x1={cx(active)} x2={cx(active)} y1={CHART_PAD.top} y2={bottom} stroke={t.mutedStrong} strokeWidth={1} />}
+      {series.map(
+        ({ id, color, points }) =>
+          points.length > 1 && (
+            <Path
+              key={id}
+              d={points.map(({ i, pct }, n) => `${n === 0 ? 'M' : 'L'}${cx(i)} ${py(pct)}`).join(' ')}
+              stroke={color}
+              strokeWidth={2}
+              strokeLinejoin="round"
+              fill="none"
+            />
+          ),
+      )}
+      {series.map(({ id, color, points }) =>
+        points.map(({ i, pct }) => (
+          <Circle key={`${id}-${i}`} cx={cx(i)} cy={py(pct)} r={active === i ? 5.5 : 4} fill={color} stroke={t.surface} strokeWidth={2} />
+        )),
+      )}
+      {/* Tap anywhere in a column to see that day, week or month. */}
+      {buckets.map((start, i) => (
+        <Rect key={start} x={CHART_PAD.left + slot * i} y={0} width={slot} height={CHART_H} fill="#000" fillOpacity={0} onPress={() => onSelect(i)} />
+      ))}
+    </Svg>
+  );
+}
+
+function PracticeChartsScreen({
+  locations,
+  sessions,
+  selected,
+  setSelected,
+}: {
+  locations: PracticeLocation[];
+  sessions: PracticeSession[];
+  selected: string | null;
+  setSelected: (id: string) => void;
+}) {
+  const { styles, t } = useTheme();
+  const [range, setRange] = useState<ChartRange>('week');
+  const [active, setActive] = useState<number | null>(null); // the tapped bucket's start
+  // The chosen shots and the color slot each keeps while it's chosen, so colors don't shift as others are toggled.
+  const [picked, setPicked] = useState<{ locationId: string; slots: Record<string, number> } | null>(null);
+
+  const location = locations.find((l) => l.id === selected) ?? locations[0];
+  const here = useMemo(() => sessions.filter((s) => s.locationId === location?.id), [sessions, location]);
+  const practiced = [...PRACTICE_SHOTS, ...(location?.customShots ?? [])].filter((s) => here.some((x) => x.shot === s.id));
+  const slots: Record<string, number> =
+    location && picked?.locationId === location.id
+      ? picked.slots
+      : Object.fromEntries(practiced.slice(0, t.series.length).map((s, i) => [s.id, i]));
+  const chosen = practiced.filter((s) => s.id in slots);
+  const full = chosen.length >= t.series.length;
+
+  const { start, bucket } = chartPeriod(range, here);
+  const buckets = useMemo(() => {
+    const list: number[] = [];
+    for (let b = bucketStart(start, bucket); b <= Date.now(); b = nextBucket(b, bucket)) list.push(b);
+    return list;
+  }, [start, bucket]);
+  const inRange = here.filter((s) => s.date >= start && s.shot in slots);
+  const index = new Map(buckets.map((b, i) => [b, i]));
+  const bucketOf = (s: PracticeSession) => index.get(bucketStart(s.date, bucket)) ?? -1;
+
+  const attempts = buckets.map(() => 0);
+  for (const s of inRange) if (bucketOf(s) >= 0) attempts[bucketOf(s)] += s.attempts;
+  const series: ChartSeries[] = chosen.map(({ id }) => {
+    const made = buckets.map(() => 0);
+    const tried = buckets.map(() => 0);
+    for (const s of inRange) {
+      const i = bucketOf(s);
+      if (s.shot !== id || i < 0) continue;
+      made[i] += s.made;
+      tried[i] += s.attempts;
+    }
+    return {
+      id,
+      color: t.series[slots[id]],
+      points: tried.flatMap((n, i) => (n > 0 ? [{ i, pct: made[i] / n }] : [])),
+    };
+  });
+
+  const activeIndex = active === null ? null : index.get(active) ?? null;
+  const detail = activeIndex === null ? inRange : inRange.filter((s) => bucketOf(s) === activeIndex);
+  const detailRows = chosen.filter((s) => detail.some((x) => x.shot === s.id));
+
+  const toggle = (id: string) => {
+    if (!location) return;
+    const next = { ...slots };
+    if (id in next) delete next[id];
+    else {
+      const used = new Set(Object.values(next));
+      const free = t.series.findIndex((_, i) => !used.has(i));
+      if (free < 0) return;
+      next[id] = free;
+    }
+    setPicked({ locationId: location.id, slots: next });
+  };
+
+  if (!location) return <Text style={styles.hint}>Add a location in Shot Practice to see charts.</Text>;
+
+  return (
+    <View style={{ flex: 1 }}>
+      <LocationPicker
+        locations={locations}
+        selected={location}
+        onSelect={(id) => {
+          setSelected(id);
+          setActive(null);
+        }}
+      />
+      <View style={styles.modeRow}>
+        {CHART_RANGES.map(({ key, label }) => (
+          <Pressable
+            key={key}
+            onPress={() => {
+              setRange(key);
+              setActive(null);
+            }}
+            accessibilityRole="button"
+            accessibilityState={{ selected: range === key }}
+            style={[styles.chip, range === key && styles.chipOn]}
+          >
+            <Text style={[styles.chipText, range === key && styles.chipTextOn]}>{label}</Text>
+          </Pressable>
+        ))}
+      </View>
+      {practiced.length === 0 ? (
+        <Text style={styles.hint}>No practice results at {location.name} yet.</Text>
+      ) : (
+        <ScrollView contentContainerStyle={{ paddingBottom: 16 }}>
+          <View style={styles.chartCard}>
+            <View style={styles.chartAxisTitles}>
+              <Text style={styles.statSmall}>Make %  (lines)</Text>
+              <Text style={styles.statSmall}>Attempts  (bars)</Text>
+            </View>
+            <PracticeChart
+              buckets={buckets}
+              bucket={bucket}
+              series={series}
+              attempts={attempts}
+              active={activeIndex}
+              onSelect={(i) => setActive((prev) => (prev === buckets[i] ? null : buckets[i]))}
+            />
+          </View>
+          {inRange.length === 0 && <Text style={styles.hint}>No results for these shots in this period.</Text>}
+
+          <View style={styles.shotChips}>
+            {practiced.map((s) => {
+              const on = s.id in slots;
+              return (
+                <Pressable
+                  key={s.id}
+                  onPress={() => toggle(s.id)}
+                  disabled={!on && full}
+                  accessibilityRole="checkbox"
+                  accessibilityState={{ checked: on, disabled: !on && full }}
+                  style={[styles.chip, styles.seriesChip, !on && full && { opacity: 0.4 }]}
+                >
+                  <View style={[styles.seriesDot, on ? { backgroundColor: t.series[slots[s.id]] } : { borderWidth: 1.5, borderColor: t.muted }]} />
+                  <Text style={[styles.chipText, !on && { color: t.muted }]}>{s.name}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+          {full && practiced.length > chosen.length && (
+            <Text style={styles.hint}>Up to {t.series.length} shots at a time. Unselect one to add another.</Text>
+          )}
+
+          <View style={styles.panel}>
+            <Text style={styles.panelTitle}>
+              {activeIndex === null ? CHART_RANGES.find(({ key }) => key === range)?.summary : bucketLabel(buckets[activeIndex], bucket)}
+            </Text>
+            {detailRows.length === 0 && <Text style={styles.statSmall}>No results.</Text>}
+            {detailRows.map((s) => (
+              <View key={s.id} style={styles.practiceRow}>
+                <View style={[styles.seriesDot, { backgroundColor: t.series[slots[s.id]], marginRight: 8 }]} />
+                <Text style={[styles.statLine, { flex: 1 }]}>{s.name}</Text>
+                <Text style={styles.statLine}>{practiceLine(detail.filter((x) => x.shot === s.id))}</Text>
+              </View>
+            ))}
+            {detailRows.length > 1 && (
+              <View style={styles.practiceRow}>
+                <Text style={[styles.statLine, { flex: 1, fontWeight: '700' }]}>All selected shots</Text>
+                <Text style={[styles.statLine, { fontWeight: '700' }]}>{practiceLine(detail)}</Text>
+              </View>
+            )}
+            <Text style={styles.statSmall}>
+              {activeIndex === null ? 'Tap the chart to see a single point.' : 'Tap the same point again to see the whole period.'}
+            </Text>
+          </View>
+        </ScrollView>
+      )}
+    </View>
+  );
+}
+
 const COLOR_SWATCHES: { name: string; hex: string }[] = [
   { name: 'Wood', hex: '#ecc99e' },
   { name: 'Medium wood', hex: '#dcb382' },
@@ -1007,6 +1930,8 @@ function SettingsScreen({
   shots,
   freeThrows,
   rebounds,
+  practiceLocations,
+  practiceSessions,
   colors,
   setColors,
   themeMode,
@@ -1016,6 +1941,8 @@ function SettingsScreen({
   shots: Shot[];
   freeThrows: FreeThrow[];
   rebounds: Rebound[];
+  practiceLocations: PracticeLocation[];
+  practiceSessions: PracticeSession[];
   colors: CourtColors;
   setColors: (colors: CourtColors) => void;
   themeMode: ThemeMode;
@@ -1034,7 +1961,7 @@ function SettingsScreen({
 
   const exportData = async () => {
     try {
-      await Share.share({ message: JSON.stringify({ players, shots, freeThrows, rebounds }, null, 2) });
+      await Share.share({ message: JSON.stringify({ players, shots, freeThrows, rebounds, practiceLocations, practiceSessions }, null, 2) });
     } catch {
       Alert.alert('Export failed', "Couldn't open the share sheet. Please try again.");
     }
@@ -1134,7 +2061,7 @@ function SettingsScreen({
           <View style={styles.statCard}>
             <Text style={styles.statName}>Export data</Text>
             <Text style={styles.statSmall}>
-              Shares all players, shots, free throws and rebounds as JSON text. Save it somewhere safe to keep a copy.
+              Shares all players, shots, free throws, rebounds and shot practice results as JSON text. Save it somewhere safe to keep a copy.
             </Text>
             <Pressable style={[styles.btn, styles.btnBlue, { marginTop: 12 }]} onPress={exportData}>
               <Text style={[styles.btnText, { color: '#fff' }]}>Export data</Text>
@@ -1148,12 +2075,14 @@ function SettingsScreen({
 
 // ---------- App ----------
 
-type Tab = 'shots' | 'stats' | 'heat' | 'settings';
+type Tab = 'shots' | 'stats' | 'heat' | 'practice' | 'practiceCharts' | 'settings';
 
 const TABS: [Tab, string][] = [
   ['shots', 'Shot Chart'],
   ['stats', 'Stats'],
   ['heat', 'Heat Map'],
+  ['practice', 'Shot Practice'],
+  ['practiceCharts', 'Practice Charts'],
   ['settings', 'Settings'],
 ];
 
@@ -1192,6 +2121,19 @@ function TabIcon({ tab, color }: { tab: Tab; color: string }) {
             opacity={opacity}
           />
         ))}
+      {tab === 'practice' && (
+        <>
+          <Circle cx={12} cy={12} r={9} {...stroke} />
+          <Circle cx={12} cy={12} r={5} {...stroke} />
+          <Circle cx={12} cy={12} r={1.8} fill={color} />
+        </>
+      )}
+      {tab === 'practiceCharts' && (
+        <>
+          <Path d="M3 4 V20 H21" {...stroke} />
+          <Path d="M6.5 15 L11 10 L14.5 13 L20 7" {...stroke} strokeLinejoin="round" />
+        </>
+      )}
       {tab === 'settings' && (
         <>
           <Line x1={4} y1={7} x2={20} y2={7} {...stroke} />
@@ -1209,6 +2151,11 @@ export default function App() {
   const [shots, setShots] = useState<Shot[]>([]);
   const [freeThrows, setFreeThrows] = useState<FreeThrow[]>([]);
   const [rebounds, setRebounds] = useState<Rebound[]>([]);
+  const [practiceLocations, setPracticeLocations] = useState<PracticeLocation[]>([]);
+  const [practiceSessions, setPracticeSessions] = useState<PracticeSession[]>([]);
+  const [practiceLocation, setPracticeLocation] = useState<string | null>(null);
+  // Starts with the basket at the top, so the shooter's left is on the left of the screen.
+  const [practiceRotation, setPracticeRotation] = useState<Rotation>(180);
   const [rotation, setRotation] = useState<Rotation>(0);
   const [colors, setColors] = useState<CourtColors>(DEFAULT_COLORS);
   const [themeMode, setThemeMode] = useState<ThemeMode>('light');
@@ -1239,6 +2186,9 @@ export default function App() {
           setShots((d.shots ?? []).map(migrateShot));
           setFreeThrows(d.freeThrows ?? []);
           setRebounds(d.rebounds ?? []);
+          setPracticeLocations(d.practiceLocations ?? []);
+          setPracticeSessions(d.practiceSessions ?? []);
+          setPracticeRotation(d.practiceRotation ?? 180);
           setRotation(d.rotation ?? 0);
           setColors({ ...DEFAULT_COLORS, ...d.colors });
           // Saves from before Match device stored a plain on/off.
@@ -1254,8 +2204,22 @@ export default function App() {
 
   useEffect(() => {
     if (!loaded || savingBlocked) return;
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ players, shots, freeThrows, rebounds, rotation, colors, themeMode })).catch(() => {});
-  }, [players, shots, freeThrows, rebounds, rotation, colors, themeMode, loaded, savingBlocked]);
+    AsyncStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        players,
+        shots,
+        freeThrows,
+        rebounds,
+        practiceLocations,
+        practiceSessions,
+        rotation,
+        practiceRotation,
+        colors,
+        themeMode,
+      }),
+    ).catch(() => {});
+  }, [players, shots, freeThrows, rebounds, practiceLocations, practiceSessions, rotation, practiceRotation, colors, themeMode, loaded, savingBlocked]);
 
   const addPlayer = (name: string) => {
     const p = { id: uid(), name };
@@ -1282,6 +2246,30 @@ export default function App() {
       const i = prev.map((r) => r.playerId === playerId && r.kind === kind).lastIndexOf(true);
       return i < 0 ? prev : prev.filter((_, idx) => idx !== i);
     });
+  const addLocation = (name: string) => {
+    const l = { id: uid(), name, customShots: [] };
+    setPracticeLocations((prev) => [...prev, l]);
+    setPracticeLocation(l.id);
+  };
+  const deleteLocation = (id: string) => {
+    setPracticeLocations((prev) => prev.filter((l) => l.id !== id));
+    setPracticeSessions((prev) => prev.filter((s) => s.locationId !== id));
+  };
+  const addCustomShot = (locationId: string, name: string) => {
+    const id = uid();
+    setPracticeLocations((prev) =>
+      prev.map((l) => (l.id === locationId ? { ...l, customShots: [...l.customShots, { id, name }] } : l)),
+    );
+    return id;
+  };
+  const deleteCustomShot = (locationId: string, shotId: string) => {
+    setPracticeLocations((prev) =>
+      prev.map((l) => (l.id === locationId ? { ...l, customShots: l.customShots.filter((c) => c.id !== shotId) } : l)),
+    );
+    setPracticeSessions((prev) => prev.filter((s) => s.locationId !== locationId || s.shot !== shotId));
+  };
+  const addPracticeSession = (s: Omit<PracticeSession, 'id'>) => setPracticeSessions((prev) => [...prev, { ...s, id: uid() }]);
+  const deletePracticeSession = (id: string) => setPracticeSessions((prev) => prev.filter((s) => s.id !== id));
   const rotateCourt = () => setRotation((prev) => ((prev + 90) % 360) as Rotation);
 
   if (!loaded) return null;
@@ -1329,12 +2317,39 @@ export default function App() {
                   rotateCourt={rotateCourt}
                 />
               )}
+              {tab === 'practice' && (
+                <ShotPracticeScreen
+                  locations={practiceLocations}
+                  sessions={practiceSessions}
+                  selected={practiceLocation}
+                  setSelected={setPracticeLocation}
+                  addLocation={addLocation}
+                  deleteLocation={deleteLocation}
+                  addCustomShot={addCustomShot}
+                  deleteCustomShot={deleteCustomShot}
+                  addSession={addPracticeSession}
+                  deleteSession={deletePracticeSession}
+                  colors={colors}
+                  rotation={practiceRotation}
+                  rotateCourt={() => setPracticeRotation((prev) => ((prev + 90) % 360) as Rotation)}
+                />
+              )}
+              {tab === 'practiceCharts' && (
+                <PracticeChartsScreen
+                  locations={practiceLocations}
+                  sessions={practiceSessions}
+                  selected={practiceLocation}
+                  setSelected={setPracticeLocation}
+                />
+              )}
               {tab === 'settings' && (
                 <SettingsScreen
                   players={players}
                   shots={shots}
                   freeThrows={freeThrows}
                   rebounds={rebounds}
+                  practiceLocations={practiceLocations}
+                  practiceSessions={practiceSessions}
                   colors={colors}
                   setColors={setColors}
                   themeMode={themeMode}
@@ -1381,6 +2396,10 @@ const LIGHT_COLORS = {
   heatCourt: '#ffffff',
   heatLine: '#868e96',
   heatHoop: '#343a40',
+  grid: '#e9ecef',
+  bar: '#ced4da',
+  // Chart series, in this order so neighbors stay distinguishable with color blindness.
+  series: ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'],
 };
 
 const DARK_COLORS: typeof LIGHT_COLORS = {
@@ -1399,6 +2418,9 @@ const DARK_COLORS: typeof LIGHT_COLORS = {
   heatCourt: '#343a40',
   heatLine: '#ffffff',
   heatHoop: '#ffffff',
+  grid: '#2b3035',
+  bar: '#495057',
+  series: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'],
 };
 
 const makeStyles = (t: typeof LIGHT_COLORS) =>
@@ -1417,6 +2439,8 @@ const makeStyles = (t: typeof LIGHT_COLORS) =>
     zoomBar: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, marginTop: 10 },
     zoomBtn: { width: 44, alignItems: 'center' },
     zoomLabel: { width: 52, textAlign: 'center', color: t.mutedStrong },
+    courtActions: { flexDirection: 'row', justifyContent: 'center', gap: 8, marginTop: 16 },
+    fullScreenBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 8 },
     modeRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingBottom: 10 },
     heatLegend: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 2, marginTop: 12 },
     heatSwatch: { width: 24, height: 12, borderRadius: 2 },
@@ -1434,6 +2458,26 @@ const makeStyles = (t: typeof LIGHT_COLORS) =>
     btnRed: { backgroundColor: '#e03131' },
     panel: { marginTop: 16, marginHorizontal: 12, padding: 14, backgroundColor: t.surface, borderRadius: 12 },
     popupReboundBtn: { flex: 1, justifyContent: 'center', paddingHorizontal: 8 },
+    shotChips: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: 12, paddingHorizontal: 12 },
+    practiceRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingVertical: 10,
+      marginTop: 8,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: t.border,
+    },
+    calendarHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    calendarNav: { paddingHorizontal: 14, paddingVertical: 6 },
+    calendarGrid: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 4 },
+    calendarCell: { width: `${100 / 7}%`, height: 38, alignItems: 'center', justifyContent: 'center' },
+    calendarDay: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+    calendarDayOn: { backgroundColor: '#1971c2' },
+    dateButton: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+    chartCard: { backgroundColor: t.surface, borderRadius: 12, paddingVertical: 10, marginHorizontal: 12, alignItems: 'center' },
+    chartAxisTitles: { flexDirection: 'row', justifyContent: 'space-between', alignSelf: 'stretch', paddingHorizontal: 12 },
+    seriesChip: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+    seriesDot: { width: 10, height: 10, borderRadius: 5 },
     reboundRow: { flexDirection: 'row', gap: 12, marginTop: 16, marginHorizontal: 12 },
     reboundPanel: { flex: 1, marginTop: 0, marginHorizontal: 0 },
     panelHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
