@@ -1,6 +1,6 @@
 import Svg, { Rect, Circle, Line, Path } from 'react-native-svg';
 
-export type Tab = 'shots' | 'stats' | 'heat' | 'practice' | 'practiceCharts' | 'settings';
+export type Tab = 'shots' | 'stats' | 'heat' | 'practice' | 'practiceCharts' | 'nbaLive' | 'settings';
 
 const HEAT_ICON_OPACITY = [0.4, 0.6, 1, 0.4, 1, 0.8, 0.6, 0.8, 0.4];
 
@@ -48,6 +48,14 @@ export function TabIcon({ tab, color }: { tab: Tab; color: string }) {
         <>
           <Path d="M3 4 V20 H21" {...stroke} />
           <Path d="M6.5 15 L11 10 L14.5 13 L20 7" {...stroke} strokeLinejoin="round" />
+        </>
+      )}
+      {tab === 'nbaLive' && (
+        <>
+          <Rect x={3} y={5} width={18} height={12} rx={2} {...stroke} />
+          <Line x1={9} y1={21} x2={15} y2={21} {...stroke} />
+          <Line x1={12} y1={17} x2={12} y2={21} {...stroke} />
+          <Circle cx={12} cy={11} r={2.5} fill={color} />
         </>
       )}
       {tab === 'settings' && (

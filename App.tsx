@@ -24,6 +24,7 @@ import { StatsScreen } from './src/screens/StatsScreen';
 import { HeatMapScreen } from './src/screens/HeatMapScreen';
 import { ShotPracticeScreen } from './src/screens/ShotPracticeScreen';
 import { PracticeChartsScreen } from './src/screens/PracticeChartsScreen';
+import { NbaLiveScreen } from './src/screens/NbaLiveScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -44,6 +45,7 @@ const TABS: [Tab, string][] = [
   ['heat', 'Heat Map'],
   ['practice', 'Shot Practice'],
   ['practiceCharts', 'Practice Charts'],
+  ['nbaLive', 'NBA Live'],
   ['settings', 'Settings'],
 ];
 
@@ -243,6 +245,7 @@ export default function App() {
                   setSelected={setPracticeLocation}
                 />
               )}
+              {tab === 'nbaLive' && <NbaLiveScreen />}
               {tab === 'settings' && (
                 <SettingsScreen
                   players={players}
